@@ -1,6 +1,6 @@
 {
-  "last_observed_at": "2026-09-05T18:00:00+09:00",
-  "last_seen_rate": 8.8,
+  "last_observed_at": "2026-09-05T19:00:00+09:00",
+  "last_seen_rate": 8.7,
   "last_posted_at": "2026-09-05T19:08:34.974676+09:00",
   "last_posted_observed_at": "2026-09-05T18:00:00+09:00",
   "last_posted_rate": 8.8,
@@ -12,6 +12,14 @@
       "storage_thousand_m3": 29690.0,
       "inflow_m3_s": 11.52,
       "outflow_m3_s": 41.6,
+      "rainfall_mm_h": 0.0
+    },
+    {
+      "observed_at": "2026-09-05T19:00:00+09:00",
+      "rate": 8.7,
+      "storage_thousand_m3": 29570.0,
+      "inflow_m3_s": 10.77,
+      "outflow_m3_s": 45.7,
       "rainfall_mm_h": 0.0
     }
   ],
