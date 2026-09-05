@@ -425,7 +425,7 @@ def fmt(v: float | None, digits: int = 1) -> str:
 def mood(delta: float | None, rate: float) -> str:
     """A little personality without making drought alerts feel flippant."""
     if delta is None:
-        return "💧"
+    return "🚨💧" if rate < 10 else "💧"
 
     # Below 10%, keep the tone more alert even if the latest observation improved.
     if rate < 10:
