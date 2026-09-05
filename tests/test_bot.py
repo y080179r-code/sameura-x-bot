@@ -173,3 +173,67 @@ class TestMoodV4(unittest.TestCase):
     def test_movement_comment(self):
         self.assertEqual(bot.movement_comment(1.2, 30), "いい感じに増えてます😊")
         self.assertEqual(bot.movement_comment(-2.2, 30), "大きく減少しています🚨")
+
+class TestDroughtStatusV45(unittest.TestCase):
+    def test_parse_home_banner_active(self):
+        text = "早明浦ダムの貯水率低下に伴い、8月28日9時から第四次取水制限が実施されています。"
+        status = bot.parse_drought_status_text(text)
+        self.assertIsNotNone(status)
+        self.assertTrue(status["restriction_active"])
+        self.assertEqual(status["restriction_level"], "第四次")
+
+    def test_parse_water_source_continuing_active(self):
+        text = "令和8年9月1日 継続中 第四次取水制限（香川県60.0%）"
+        status = bot.parse_drought_status_text(text)
+        self.assertIsNotNone(status)
+        self.assertTrue(status["restriction_active"])
+        self.assertEqual(status["restriction_level"], "第四次")
+
+    def test_historical_restriction_alone_is_not_current(self):
+        text = "令和8年8月3日 第一次取水制限 令和8年8月10日 第二次取水制限"
+        self.assertIsNone(bot.parse_drought_status_text(text))
+
+    def test_drought_hashtag_only_when_official_restriction_active(self):
+        base_obs = {
+            "observed_at": "2026-09-05T20:00:00+09:00",
+            "rate": 8.6,
+            "rainfall_mm_h": 0.0,
+            "storage_thousand_m3": 29440.0,
+            "inflow_m3_s": 10.2,
+            "outflow_m3_s": 44.0,
+            "source": "国土交通省 川の防災情報",
+            "source_url": bot.RIVER_URL,
+            "source_kind": "realtime",
+        }
+        prev = {"observed_at": "2026-09-05T19:00:00+09:00", "rate": 8.7}
+        state = bot.default_state()
+        state["history"] = [prev, {"observed_at": base_obs["observed_at"], "rate": base_obs["rate"]}]
+
+        active_obs = dict(base_obs, drought_restriction_active=True)
+        text = bot.build_post(active_obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertIn("#早明浦ダム #吉野川 #渇水", text)
+
+        normal_obs = dict(base_obs, drought_restriction_active=False)
+        text = bot.build_post(normal_obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertIn("#早明浦ダム #吉野川", text)
+        self.assertNotIn("#渇水", text)
+
+    def test_regular_title_is_fixed_and_source_line_is_absent(self):
+        obs = {
+            "observed_at": "2026-09-05T20:00:00+09:00",
+            "rate": 8.6,
+            "rainfall_mm_h": 0.0,
+            "storage_thousand_m3": 29440.0,
+            "inflow_m3_s": 10.2,
+            "outflow_m3_s": 44.0,
+            "source": "国土交通省 川の防災情報",
+            "source_url": bot.RIVER_URL,
+            "source_kind": "realtime",
+            "drought_restriction_active": True,
+        }
+        prev = {"observed_at": "2026-09-05T19:00:00+09:00", "rate": 8.7}
+        state = bot.default_state()
+        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
+        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertTrue(text.startswith("💧 早明浦ダム 貯水率\n"))
+        self.assertNotIn("出典：", text)
