@@ -30,6 +30,7 @@ JST = ZoneInfo("Asia/Tokyo")
 
 RIVER_URL = "https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID=1368080700010&KIND=3"
 WATER_URL = "https://www.water.go.jp/yoshino/yoshino/"
+WATER_SOURCE_URL = "https://www.water.go.jp/yoshino/yoshino/water_source.html"
 X_POST_URL = "https://api.x.com/2/tweets"
 STATE_PATH = Path(os.getenv("STATE_PATH", "state.json"))
 
@@ -58,7 +59,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.4 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.5 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -249,6 +250,98 @@ def fetch_observation() -> dict[str, Any]:
         return fetch_water_fallback()
 
 
+def _restriction_level(text: str) -> str | None:
+    """Extract strings such as 第四次 from nearby current restriction wording."""
+    level = r"第[一二三四五六七八九十]+次"
+    patterns = [
+        rf"({level})取水制限[^。\n]{{0,60}}(?:実施されています|継続中)",
+        rf"(?:実施されています|継続中)[^。\n]{{0,60}}({level})取水制限",
+        rf"継続中\s*({level})取水制限",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def parse_drought_status_text(text: str) -> dict[str, Any] | None:
+    """Parse explicit *current* Yoshinogawa intake-restriction wording.
+
+    Historical lines such as ``第一次取水制限`` by themselves do not count.
+    We only treat a page as active when it says the restriction is being
+    implemented/continued now.  This keeps #渇水 tied to the official status
+    rather than an arbitrary reservoir percentage.
+    """
+    text = clean(text)
+
+    active_patterns = [
+        r"取水制限が実施されています",
+        r"継続中[^。\n]{0,80}取水制限",
+        r"取水制限[^。\n]{0,80}継続中",
+    ]
+    if any(re.search(p, text) for p in active_patterns):
+        return {
+            "restriction_active": True,
+            "restriction_level": _restriction_level(text),
+        }
+
+    # Explicit release wording wins only when no active marker was found above.
+    if re.search(r"取水制限[^。\n]{0,80}解除|解除[^。\n]{0,80}取水制限", text):
+        return {
+            "restriction_active": False,
+            "restriction_level": None,
+        }
+
+    return None
+
+
+def fetch_drought_status() -> dict[str, Any]:
+    """Get the official current Yoshinogawa intake-restriction status.
+
+    The top page currently carries a plain-language banner while the detailed
+    water-source page carries entries such as ``継続中 第四次取水制限``.
+    We check both so small layout/text changes on one page do not break #渇水.
+    """
+    s = requests.Session()
+    s.headers.update(HEADERS)
+
+    pages: list[tuple[str, str]] = []
+    errors: list[str] = []
+    for url in (WATER_URL, WATER_SOURCE_URL):
+        try:
+            r = s.get(url, timeout=20)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.content, "html.parser")
+            pages.append((url, clean(soup.get_text(" ", strip=True))))
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{url}: {e}")
+
+    if not pages:
+        raise RuntimeError("drought-status pages unavailable: " + " | ".join(errors))
+
+    # Any explicit current-active marker takes precedence.
+    for url, text in pages:
+        parsed = parse_drought_status_text(text)
+        if parsed and parsed["restriction_active"]:
+            parsed["source_url"] = url
+            return parsed
+
+    # If an explicit release marker appears, treat the restriction as ended.
+    for url, text in pages:
+        parsed = parse_drought_status_text(text)
+        if parsed and parsed["restriction_active"] is False:
+            parsed["source_url"] = url
+            return parsed
+
+    # The official pages were reachable but no current restriction marker exists.
+    return {
+        "restriction_active": False,
+        "restriction_level": None,
+        "source_url": WATER_SOURCE_URL,
+    }
+
+
 def default_state() -> dict[str, Any]:
     return {
         "last_observed_at": None,
@@ -260,6 +353,11 @@ def default_state() -> dict[str, Any]:
         "history": [],
         "report_slots": {},
         "daily_post_counts": {},
+        "drought_status": {
+            "restriction_active": None,
+            "restriction_level": None,
+            "source_url": WATER_SOURCE_URL,
+        },
     }
 
 
@@ -585,7 +683,10 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
     if obs.get("rainfall_mm_h") is not None and float(obs["rainfall_mm_h"]) > 0:
         lines.append(f"流域平均雨量 {fmt(obs['rainfall_mm_h'])} mm/h")
 
-    lines.append("#早明浦ダム #吉野川")
+    tags = ["#早明浦ダム", "#吉野川"]
+    if obs.get("drought_restriction_active") is True:
+        tags.append("#渇水")
+    lines.append(" ".join(tags))
 
     # Intentionally no source line or source URL in auto-posts.
     # The data source is shown in the X profile / pinned post instead.
@@ -616,6 +717,20 @@ def main() -> int:
     now = datetime.now(JST)
     obs = fetch_observation()
     state = load_state()
+
+    # #渇水 is controlled by the official Yoshinogawa intake-restriction status,
+    # not by a made-up reservoir-percentage threshold. If the official status
+    # pages are temporarily unavailable, keep the last successfully known status.
+    try:
+        drought_status = fetch_drought_status()
+        state["drought_status"] = drought_status
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] drought status failed: {e}", file=sys.stderr)
+        drought_status = state.get("drought_status") or {}
+
+    obs["drought_restriction_active"] = drought_status.get("restriction_active")
+    obs["drought_restriction_level"] = drought_status.get("restriction_level")
+
     prev, is_new = update_history(state, obs)
 
     state["last_observed_at"] = obs["observed_at"]
