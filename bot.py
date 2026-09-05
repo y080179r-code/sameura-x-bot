@@ -58,7 +58,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.2 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.3 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -377,41 +377,68 @@ def increment_posts_today(state: dict[str, Any], now: datetime) -> None:
 
 
 def choose_decision(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] | None, is_new: bool, now: datetime) -> Decision:
+    """Decide whether the latest observation should be posted.
+
+    The adaptive cadence is based on *observation timestamps*, not the wall-clock time
+    when the previous X post happened. This matters especially below 10%: if the bot
+    posts the 18:00 observation at 19:05, the 19:00 observation can still be posted as
+    soon as it is seen instead of waiting until 20:05.
+
+    `is_new` tells us whether this run appended the observation to history, but an
+    observation may have been seen earlier and intentionally not posted (for example
+    because the minimum post interval was still active). Therefore we also compare the
+    current observation against `last_posted_observed_at` so an eligible observation is
+    not lost on the next poll.
+    """
     if FORCE_POST:
         return Decision(True, "FORCE_POST", "forced")
 
     if posts_today(state, now) >= MAX_POSTS_PER_DAY:
         return Decision(False, "daily safety cap reached")
 
+    rate = float(obs["rate"])
+    observed = as_dt(obs.get("observed_at"))
     last_posted = as_dt(state.get("last_posted_at"))
+    last_posted_observed = as_dt(state.get("last_posted_observed_at"))
+    last_posted_rate = state.get("last_posted_rate")
+
+    # First ever successful post.
+    if last_posted_observed is None:
+        return Decision(True, "first observation", "first")
+
+    # Nothing newer than the observation already posted.
+    if observed is None or observed <= last_posted_observed:
+        return Decision(False, "no newer observation")
+
+    # Safety against accidental bursts. This may defer a new observation, but because
+    # the cadence check below uses last_posted_observed_at, the observation remains
+    # eligible on the next poll instead of being permanently skipped.
     if last_posted and (now - last_posted) < timedelta(minutes=MIN_POST_INTERVAL_MINUTES):
         return Decision(False, "minimum post interval")
 
-    rate = float(obs["rate"])
-    old_rate = float(prev["rate"]) if prev and prev.get("rate") is not None else None
+    # Compare with the last *posted* rate so a threshold crossing or rapid move that was
+    # first seen during the minimum interval can still be announced on the next poll.
+    old_posted_rate = float(last_posted_rate) if last_posted_rate is not None else None
 
-    # Threshold crossings always get priority, independent of the normal cadence.
-    crossing = crossed_threshold(old_rate, rate)
-    if is_new and crossing:
+    crossing = crossed_threshold(old_posted_rate, rate)
+    if crossing:
         direction, threshold = crossing
         return Decision(True, f"crossed {threshold}% {direction}", "threshold", threshold, direction)
 
-    # If the reservoir moves sharply since the previous post, don't wait for the normal cadence.
-    last_posted_rate = state.get("last_posted_rate")
-    if is_new and last_posted_rate is not None:
-        move = rate - float(last_posted_rate)
+    if old_posted_rate is not None:
+        move = rate - old_posted_rate
         if abs(move) >= RAPID_CHANGE_PT:
             return Decision(True, f"rapid change {move:+.1f}pt", "rapid")
 
-    if state.get("last_posted_observed_at") is None:
-        return Decision(True, "first observation", "first")
-
-    # Normal posting is adaptive: the lower the storage rate, the more frequently we post.
+    # Adaptive cadence is based on the timestamp of the data we last posted.
+    # Under 10%, official hourly observations are therefore posted hour by hour, even
+    # when a previous observation was manually posted late.
     interval = timedelta(hours=cadence_hours(rate))
-    if is_new and (last_posted is None or now - last_posted >= interval):
-        return Decision(True, f"adaptive cadence {cadence_label(rate)}", "regular")
+    elapsed_observation_time = observed - last_posted_observed
+    if elapsed_observation_time >= interval:
+        return Decision(True, f"observation cadence {cadence_label(rate)}", "regular")
 
-    return Decision(False, f"waiting for adaptive cadence ({cadence_label(rate)})")
+    return Decision(False, f"waiting for observation cadence ({cadence_label(rate)})")
 
 
 def fmt(v: float | None, digits: int = 1) -> str:
