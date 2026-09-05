@@ -38,33 +38,56 @@ class BotTests(unittest.TestCase):
             with self.subTest(rate=rate):
                 self.assertEqual(bot.cadence_hours(rate), expected)
 
-    def test_high_rate_waits_24h(self):
-        now = datetime(2026, 9, 5, 12, 0, tzinfo=JST)
+    def test_high_rate_waits_24h_of_observation_time(self):
+        now = datetime(2026, 9, 5, 12, 7, tzinfo=JST)
         obs = {"observed_at": "2026-09-05T12:00:00+09:00", "rate": 85.0}
         prev = {"observed_at": "2026-09-05T11:00:00+09:00", "rate": 85.0}
         state = bot.default_state()
-        state["last_posted_at"] = (now - timedelta(hours=23)).isoformat()
-        state["last_posted_observed_at"] = "2026-09-04T13:00:00+09:00"
+        state["last_posted_at"] = datetime(2026, 9, 5, 10, 0, tzinfo=JST).isoformat()
+        state["last_posted_observed_at"] = "2026-09-04T13:00:00+09:00"  # 23h ago
         state["last_posted_rate"] = 85.0
         d = bot.choose_decision(obs, state, prev, True, now)
         self.assertFalse(d.post)
 
-        state["last_posted_at"] = (now - timedelta(hours=24, minutes=1)).isoformat()
+        state["last_posted_observed_at"] = "2026-09-04T12:00:00+09:00"  # 24h ago
         d = bot.choose_decision(obs, state, prev, True, now)
         self.assertTrue(d.post)
         self.assertIn("24時間", d.reason)
 
-    def test_under_10_posts_hourly(self):
-        now = datetime(2026, 9, 5, 12, 0, tzinfo=JST)
+    def test_under_10_uses_observation_time_not_post_time(self):
+        # The 11:00 observation was posted late at 11:55. When the 12:00 observation
+        # appears at 12:07, it should still post because the DATA is one hour newer.
+        now = datetime(2026, 9, 5, 12, 7, tzinfo=JST)
         obs = {"observed_at": "2026-09-05T12:00:00+09:00", "rate": 8.7}
         prev = {"observed_at": "2026-09-05T11:00:00+09:00", "rate": 8.7}
         state = bot.default_state()
         state["last_posted_observed_at"] = "2026-09-05T11:00:00+09:00"
         state["last_posted_rate"] = 8.7
-        state["last_posted_at"] = (now - timedelta(minutes=59)).isoformat()
+        state["last_posted_at"] = datetime(2026, 9, 5, 11, 55, tzinfo=JST).isoformat()
+
+        # The 20-minute anti-burst guard still wins initially.
         self.assertFalse(bot.choose_decision(obs, state, prev, True, now).post)
-        state["last_posted_at"] = (now - timedelta(hours=1, minutes=1)).isoformat()
-        self.assertTrue(bot.choose_decision(obs, state, prev, True, now).post)
+
+        # At the next poll the SAME 12:00 observation is still eligible even though
+        # update_history would report is_new=False. It is not lost.
+        now2 = datetime(2026, 9, 5, 12, 37, tzinfo=JST)
+        d = bot.choose_decision(obs, state, obs, False, now2)
+        self.assertTrue(d.post)
+        self.assertIn("1時間ごと", d.reason)
+
+    def test_under_10_posts_next_hour_even_if_previous_post_was_late(self):
+        now = datetime(2026, 9, 5, 19, 37, tzinfo=JST)
+        obs = {"observed_at": "2026-09-05T19:00:00+09:00", "rate": 8.7}
+        prev = {"observed_at": "2026-09-05T18:00:00+09:00", "rate": 8.8}
+        state = bot.default_state()
+        state["last_posted_observed_at"] = "2026-09-05T18:00:00+09:00"
+        state["last_posted_rate"] = 8.8
+        # 18:00 data happened to be posted at 19:05. Wall-clock cadence would skip
+        # 19:00; observation-time cadence must post it at 19:37.
+        state["last_posted_at"] = datetime(2026, 9, 5, 19, 5, tzinfo=JST).isoformat()
+        d = bot.choose_decision(obs, state, prev, False, now)
+        self.assertTrue(d.post)
+        self.assertEqual(d.kind, "regular")
 
     def test_rapid_change_overrides_slow_cadence(self):
         now = datetime(2026, 9, 5, 12, 0, tzinfo=JST)
@@ -98,6 +121,27 @@ class BotTests(unittest.TestCase):
         self.assertNotIn("https://", text)
         self.assertIn("8.7%", text)
         self.assertLess(len(text), 280)
+
+
+    def test_low_rate_display_has_siren_before_rate_and_water_drop(self):
+        obs = {
+            "observed_at": "2026-09-05T19:00:00+09:00",
+            "rate": 8.8,
+            "rainfall_mm_h": 0.0,
+            "storage_thousand_m3": 29690.0,
+            "inflow_m3_s": 11.5,
+            "outflow_m3_s": 41.6,
+            "source": "国土交通省 川の防災情報",
+            "source_url": bot.RIVER_URL,
+            "source_kind": "realtime",
+        }
+        prev = {"observed_at": "2026-09-05T18:00:00+09:00", "rate": 8.9}
+        state = bot.default_state()
+        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
+        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertIn("🚨 8.8% 💧", text)
+        self.assertIn("前回比 -0.1pt 🥲", text)
+        self.assertIn("貯水量 29,690×10³m³", text)
 
     def test_extract_river_rows(self):
         html = b"""
