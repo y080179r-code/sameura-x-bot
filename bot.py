@@ -58,7 +58,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.0 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.2 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -425,7 +425,7 @@ def fmt(v: float | None, digits: int = 1) -> str:
 def mood(delta: float | None, rate: float) -> str:
     """A little personality without making drought alerts feel flippant."""
     if delta is None:
-    return "🚨💧" if rate < 10 else "💧"
+        return "💧"
 
     # Below 10%, keep the tone more alert even if the latest observation improved.
     if rate < 10:
@@ -456,6 +456,29 @@ def mood(delta: float | None, rate: float) -> str:
     if delta < 0:
         return "🥲↘️"
     return "😐➡️"
+
+
+def change_emoji(delta: float | None) -> str:
+    """Emoji for the change line. Reservoir status itself is shown separately."""
+    if delta is None:
+        return ""
+    if delta >= 2.0:
+        return "🤩"
+    if delta >= 1.0:
+        return "😄"
+    if delta >= 0.5:
+        return "😊"
+    if delta > 0:
+        return "🙂"
+    if delta <= -2.0:
+        return "😱"
+    if delta <= -1.0:
+        return "😰"
+    if delta <= -0.5:
+        return "😥"
+    if delta < 0:
+        return "🥲"
+    return "😐"
 
 
 def movement_comment(delta: float | None, rate: float) -> str | None:
@@ -500,13 +523,26 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
         variants = ["🏞️ 早明浦ダム 貯水率", "💧 早明浦ダム 定点観測", "📊 早明浦ダム 最新値"]
         title = variants[observed.hour % len(variants)]
 
+    # Keep the reservoir status line simple and consistent:
+    # - always show a water drop
+    # - below 10%, put a siren BEFORE the percentage
+    if rate < 10:
+        rate_text = f"🚨 {rate:.1f}% 💧"
+    else:
+        rate_text = f"{rate:.1f}% 💧"
+
     lines = [
         title,
-        f"{observed:%m/%d %H:%M}　{rate:.1f}% {mood(delta_prev, rate)}",
+        f"{observed:%m/%d %H:%M}　{rate_text}",
     ]
 
+    # Put the playful/emotional emoji on the change line instead of the level line.
     if delta_prev is not None:
-        lines.append(f"前回比 {delta_prev:+.1f}pt" + (f"｜24時間 {delta24:+.1f}pt" if delta24 is not None else ""))
+        change = change_emoji(delta_prev)
+        line = f"前回比 {delta_prev:+.1f}pt {change}"
+        if delta24 is not None:
+            line += f"｜24時間 {delta24:+.1f}pt"
+        lines.append(line)
     elif delta24 is not None:
         lines.append(f"24時間 {delta24:+.1f}pt")
 
