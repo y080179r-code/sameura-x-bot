@@ -515,7 +515,7 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
         lines.append(comment)
 
     if obs.get("storage_thousand_m3") is not None:
-        lines.append(f"貯水量 {fmt(obs['storage_thousand_m3'])}千m³")
+        lines.append(f"貯水量 {fmt(obs['storage_thousand_m3'])}×10³m³")
 
     if obs.get("inflow_m3_s") is not None or obs.get("outflow_m3_s") is not None:
         lines.append(f"流入 {fmt(obs.get('inflow_m3_s'))} / 放流 {fmt(obs.get('outflow_m3_s'))} m³/s")
