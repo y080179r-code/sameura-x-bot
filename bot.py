@@ -58,7 +58,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.3 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.4 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -547,8 +547,7 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
     elif decision.kind == "rapid":
         title = "⚡ 早明浦ダム 貯水率が大きく変化"
     else:
-        variants = ["🏞️ 早明浦ダム 貯水率", "💧 早明浦ダム 定点観測", "📊 早明浦ダム 最新値"]
-        title = variants[observed.hour % len(variants)]
+        title = "💧 早明浦ダム 貯水率"
 
     # Keep the reservoir status line simple and consistent:
     # - always show a water drop
@@ -586,14 +585,11 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
     if obs.get("rainfall_mm_h") is not None and float(obs["rainfall_mm_h"]) > 0:
         lines.append(f"流域平均雨量 {fmt(obs['rainfall_mm_h'])} mm/h")
 
-    lines += ["出典：" + obs["source"], "#早明浦ダム #吉野川"]
+    lines.append("#早明浦ダム #吉野川")
 
-    # Intentionally no source URL in auto-posts.
-    text = "\n".join(lines)
-    if len(text) > 270:
-        # Defensive shortening if a future source label gets longer.
-        text = text.replace("出典：国土交通省 川の防災情報", "出典：国交省 川の防災情報")
-    return text
+    # Intentionally no source line or source URL in auto-posts.
+    # The data source is shown in the X profile / pinned post instead.
+    return "\n".join(lines)
 
 
 def post_to_x(text: str) -> dict[str, Any]:
