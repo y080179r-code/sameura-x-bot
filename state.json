@@ -1,10 +1,10 @@
 {
   "last_observed_at": "2026-09-05T19:00:00+09:00",
   "last_seen_rate": 8.7,
-  "last_posted_at": "2026-09-05T19:08:34.974676+09:00",
-  "last_posted_observed_at": "2026-09-05T18:00:00+09:00",
-  "last_posted_rate": 8.8,
-  "last_post_id": "2096178695698358602",
+  "last_posted_at": "2026-09-05T19:35:32.859248+09:00",
+  "last_posted_observed_at": "2026-09-05T19:00:00+09:00",
+  "last_posted_rate": 8.7,
+  "last_post_id": "2096185480341540960",
   "history": [
     {
       "observed_at": "2026-09-05T18:00:00+09:00",
@@ -25,6 +25,6 @@
   ],
   "report_slots": {},
   "daily_post_counts": {
-    "2026-09-05": 1
+    "2026-09-05": 2
   }
 }
