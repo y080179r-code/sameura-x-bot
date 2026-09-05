@@ -1,11 +1,22 @@
 {
-  "last_observed_at": null,
-  "last_seen_rate": null,
-  "last_posted_at": null,
-  "last_posted_observed_at": null,
-  "last_posted_rate": null,
-  "last_post_id": null,
-  "history": [],
+  "last_observed_at": "2026-09-05T18:00:00+09:00",
+  "last_seen_rate": 8.8,
+  "last_posted_at": "2026-09-05T19:08:34.974676+09:00",
+  "last_posted_observed_at": "2026-09-05T18:00:00+09:00",
+  "last_posted_rate": 8.8,
+  "last_post_id": "2096178695698358602",
+  "history": [
+    {
+      "observed_at": "2026-09-05T18:00:00+09:00",
+      "rate": 8.8,
+      "storage_thousand_m3": 29690.0,
+      "inflow_m3_s": 11.52,
+      "outflow_m3_s": 41.6,
+      "rainfall_mm_h": 0.0
+    }
+  ],
   "report_slots": {},
-  "daily_post_counts": {}
+  "daily_post_counts": {
+    "2026-09-05": 1
+  }
 }
