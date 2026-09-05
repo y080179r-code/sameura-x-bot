@@ -1,0 +1,11 @@
+{
+  "last_observed_at": null,
+  "last_seen_rate": null,
+  "last_posted_at": null,
+  "last_posted_observed_at": null,
+  "last_posted_rate": null,
+  "last_post_id": null,
+  "history": [],
+  "report_slots": {},
+  "daily_post_counts": {}
+}
