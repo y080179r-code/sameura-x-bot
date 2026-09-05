@@ -1,10 +1,10 @@
 {
-  "last_observed_at": "2026-09-05T20:00:00+09:00",
-  "last_seen_rate": 8.6,
-  "last_posted_at": "2026-09-05T20:17:09.761149+09:00",
-  "last_posted_observed_at": "2026-09-05T20:00:00+09:00",
-  "last_posted_rate": 8.6,
-  "last_post_id": "2096195965879259305",
+  "last_observed_at": "2026-09-05T21:00:00+09:00",
+  "last_seen_rate": 8.5,
+  "last_posted_at": "2026-09-05T21:10:42.086462+09:00",
+  "last_posted_observed_at": "2026-09-05T21:00:00+09:00",
+  "last_posted_rate": 8.5,
+  "last_post_id": "2096209421185802416",
   "history": [
     {
       "observed_at": "2026-09-05T18:00:00+09:00",
@@ -29,10 +29,18 @@
       "inflow_m3_s": 10.15,
       "outflow_m3_s": 44.0,
       "rainfall_mm_h": 0.0
+    },
+    {
+      "observed_at": "2026-09-05T21:00:00+09:00",
+      "rate": 8.5,
+      "storage_thousand_m3": 29310.0,
+      "inflow_m3_s": 10.77,
+      "outflow_m3_s": 43.9,
+      "rainfall_mm_h": 0.0
     }
   ],
   "report_slots": {},
   "daily_post_counts": {
-    "2026-09-05": 3
+    "2026-09-05": 4
   }
 }
