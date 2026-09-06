@@ -59,7 +59,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.5 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.6 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -606,6 +606,17 @@ def change_emoji(delta: float | None) -> str:
     return "😐"
 
 
+def storage_trend_emoji(current: float | None, previous: float | None) -> str:
+    """Return a compact visual cue for reservoir-volume movement."""
+    if current is None or previous is None:
+        return ""
+    if current > previous:
+        return "🔺"
+    if current < previous:
+        return "🔽"
+    return "➖"
+
+
 def movement_comment(delta: float | None, rate: float) -> str | None:
     """Short optional comment used only for clearly noticeable moves."""
     if delta is None:
@@ -675,7 +686,14 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
         lines.append(comment)
 
     if obs.get("storage_thousand_m3") is not None:
-        lines.append(f"貯水量 {fmt(obs['storage_thousand_m3'])}×10³m³")
+        current_storage = float(obs["storage_thousand_m3"])
+        previous_storage = None
+        if prev and prev.get("storage_thousand_m3") is not None:
+            previous_storage = float(prev["storage_thousand_m3"])
+
+        arrow = storage_trend_emoji(current_storage, previous_storage)
+        suffix = f" {arrow}" if arrow else ""
+        lines.append(f"貯水量 {fmt(current_storage)}×10³m³{suffix}")
 
     if obs.get("inflow_m3_s") is not None or obs.get("outflow_m3_s") is not None:
         lines.append(f"流入 {fmt(obs.get('inflow_m3_s'))} / 放流 {fmt(obs.get('outflow_m3_s'))} m³/s")
