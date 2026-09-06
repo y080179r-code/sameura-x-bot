@@ -237,3 +237,34 @@ class TestDroughtStatusV45(unittest.TestCase):
         text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
         self.assertTrue(text.startswith("💧 早明浦ダム 貯水率\n"))
         self.assertNotIn("出典：", text)
+
+
+class TestStorageTrendV46(unittest.TestCase):
+    def test_storage_trend_emoji(self):
+        self.assertEqual(bot.storage_trend_emoji(28120.0, 28110.0), "🔺")
+        self.assertEqual(bot.storage_trend_emoji(28100.0, 28110.0), "🔽")
+        self.assertEqual(bot.storage_trend_emoji(28110.0, 28110.0), "➖")
+        self.assertEqual(bot.storage_trend_emoji(28110.0, None), "")
+
+    def test_post_shows_storage_down_arrow(self):
+        obs = {
+            "observed_at": "2026-09-06T17:00:00+09:00",
+            "rate": 7.7,
+            "rainfall_mm_h": 0.0,
+            "storage_thousand_m3": 28110.0,
+            "inflow_m3_s": 6.3,
+            "outflow_m3_s": 46.2,
+            "source": "国土交通省 川の防災情報",
+            "source_url": bot.RIVER_URL,
+            "source_kind": "realtime",
+            "drought_restriction_active": True,
+        }
+        prev = {
+            "observed_at": "2026-09-06T16:00:00+09:00",
+            "rate": 7.8,
+            "storage_thousand_m3": 28200.0,
+        }
+        state = bot.default_state()
+        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"], "storage_thousand_m3": obs["storage_thousand_m3"]}]
+        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertIn("貯水量 28,110×10³m³ 🔽", text)
