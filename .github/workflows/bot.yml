@@ -2,7 +2,7 @@ name: Sameura X Bot
 
 on:
   schedule:
-    - cron: "5,10,15,20 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
