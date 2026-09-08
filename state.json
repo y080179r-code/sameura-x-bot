@@ -1,10 +1,10 @@
 {
-  "last_observed_at": "2026-09-08T16:00:00+09:00",
+  "last_observed_at": "2026-09-08T17:00:00+09:00",
   "last_seen_rate": 5.0,
-  "last_posted_at": "2026-09-08T16:13:09.632955+09:00",
-  "last_posted_observed_at": "2026-09-08T16:00:00+09:00",
+  "last_posted_at": "2026-09-08T17:13:41.644706+09:00",
+  "last_posted_observed_at": "2026-09-08T17:00:00+09:00",
   "last_posted_rate": 5.0,
-  "last_post_id": "2097221709606838361",
+  "last_post_id": "2097236953766748248",
   "history": [
     {
       "observed_at": "2026-09-05T18:00:00+09:00",
@@ -549,6 +549,14 @@
       "inflow_m3_s": 13.45,
       "outflow_m3_s": 16.8,
       "rainfall_mm_h": 0.0
+    },
+    {
+      "observed_at": "2026-09-08T17:00:00+09:00",
+      "rate": 5.0,
+      "storage_thousand_m3": 24160.0,
+      "inflow_m3_s": 12.37,
+      "outflow_m3_s": 0.0,
+      "rainfall_mm_h": 0.1
     }
   ],
   "report_slots": {},
@@ -556,11 +564,11 @@
     "2026-09-05": 6,
     "2026-09-06": 23,
     "2026-09-07": 23,
-    "2026-09-08": 16
+    "2026-09-08": 17
   },
   "drought_status": {
-    "restriction_active": true,
-    "restriction_level": "第四次",
+    "restriction_active": false,
+    "restriction_level": null,
     "source_url": "https://www.water.go.jp/yoshino/yoshino/water_source.html"
   }
 }
