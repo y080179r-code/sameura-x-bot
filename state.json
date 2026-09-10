@@ -7,14 +7,6 @@
   "last_post_id": "2098112861839179961",
   "history": [
     {
-      "observed_at": "2026-09-08T04:00:00+09:00",
-      "rate": 5.3,
-      "storage_thousand_m3": 24540.0,
-      "inflow_m3_s": 0.0,
-      "outflow_m3_s": 43.8,
-      "rainfall_mm_h": 0.0
-    },
-    {
       "observed_at": "2026-09-08T05:00:00+09:00",
       "rate": 5.2,
       "storage_thousand_m3": 24400.0,
