@@ -59,7 +59,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.6 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.7 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -584,26 +584,14 @@ def mood(delta: float | None, rate: float) -> str:
 
 
 def change_emoji(delta: float | None) -> str:
-    """Emoji for the change line. Reservoir status itself is shown separately."""
+    """Arrow for the previous-rate change: up / flat / down."""
     if delta is None:
         return ""
-    if delta >= 2.0:
-        return "🤩"
-    if delta >= 1.0:
-        return "😄"
-    if delta >= 0.5:
-        return "😊"
     if delta > 0:
-        return "🙂"
-    if delta <= -2.0:
-        return "😱"
-    if delta <= -1.0:
-        return "😰"
-    if delta <= -0.5:
-        return "😥"
+        return "⬆️"
     if delta < 0:
-        return "🥲"
-    return "😐"
+        return "⬇️"
+    return "➡️"
 
 
 def storage_trend_emoji(current: float | None, previous: float | None) -> str:
@@ -671,7 +659,7 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
         f"{observed:%m/%d %H:%M}　{rate_text}",
     ]
 
-    # Put the playful/emotional emoji on the change line instead of the level line.
+    # Show the previous-rate direction with a simple arrow for readability.
     if delta_prev is not None:
         change = change_emoji(delta_prev)
         line = f"前回比 {delta_prev:+.1f}pt {change}"
