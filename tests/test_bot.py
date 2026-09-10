@@ -140,7 +140,7 @@ class BotTests(unittest.TestCase):
         state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
         text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
         self.assertIn("🚨 8.8% 💧", text)
-        self.assertIn("前回比 -0.1pt 🥲", text)
+        self.assertIn("前回比 -0.1pt ⬇️", text)
         self.assertIn("貯水量 29,690×10³m³", text)
 
     def test_extract_river_rows(self):
@@ -268,3 +268,11 @@ class TestStorageTrendV46(unittest.TestCase):
         state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"], "storage_thousand_m3": obs["storage_thousand_m3"]}]
         text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
         self.assertIn("貯水量 28,110×10³m³ 🔽", text)
+
+
+class TestRateChangeArrowV47(unittest.TestCase):
+    def test_rate_change_arrows(self):
+        self.assertEqual(bot.change_emoji(0.1), "⬆️")
+        self.assertEqual(bot.change_emoji(0.0), "➡️")
+        self.assertEqual(bot.change_emoji(-0.1), "⬇️")
+        self.assertEqual(bot.change_emoji(None), "")
