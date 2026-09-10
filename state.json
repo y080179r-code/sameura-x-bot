@@ -569,8 +569,8 @@
     "2026-09-10": 12
   },
   "drought_status": {
-    "restriction_active": false,
-    "restriction_level": null,
-    "source_url": "https://www.water.go.jp/yoshino/yoshino/"
+    "restriction_active": true,
+    "restriction_level": "第四次",
+    "source_url": "https://www.water.go.jp/yoshino/yoshino/water_source.html"
   }
 }
