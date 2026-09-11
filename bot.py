@@ -34,7 +34,13 @@ WATER_SOURCE_URL = "https://www.water.go.jp/yoshino/yoshino/water_source.html"
 X_POST_URL = "https://api.x.com/2/tweets"
 STATE_PATH = Path(os.getenv("STATE_PATH", "state.json"))
 
-THRESHOLDS = sorted({float(x) for x in os.getenv("THRESHOLDS", "5,10,15,20,25,30,40,50,60,70,80,90").split(",") if x.strip()})
+THRESHOLDS = sorted(
+    {
+        float(x)
+        for x in os.getenv("THRESHOLDS", "5,10,15,20,25,30,40,50,60,70,80,90").split(",")
+        if x.strip()
+    }
+)
 MAX_POSTS_PER_DAY = int(os.getenv("MAX_POSTS_PER_DAY", "30"))
 MIN_POST_INTERVAL_MINUTES = int(os.getenv("MIN_POST_INTERVAL_MINUTES", "20"))
 RAPID_CHANGE_PT = float(os.getenv("RAPID_CHANGE_PT", "1.0"))
@@ -198,7 +204,7 @@ def fetch_river() -> dict[str, Any]:
             if not rows:
                 raise RuntimeError("river.go.jp: no usable observation rows found")
             return max(rows, key=lambda x: x["observed_at"])
-        except Exception as e:  # noqa: BLE001 - deliberately retry all network/parse errors
+        except Exception as e:  # noqa: BLE001
             last_error = e
             if attempt < 2:
                 time.sleep(1.2 * (attempt + 1))
@@ -270,7 +276,7 @@ def parse_drought_status_text(text: str) -> dict[str, Any] | None:
 
     Historical lines such as ``第一次取水制限`` by themselves do not count.
     We only treat a page as active when it says the restriction is being
-    implemented/continued now.  This keeps #渇水 tied to the official status
+    implemented/continued now. This keeps #渇水 tied to the official status
     rather than an arbitrary reservoir percentage.
     """
     text = clean(text)
@@ -375,7 +381,10 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    STATE_PATH.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def as_dt(iso: str | None) -> datetime | None:
@@ -474,7 +483,13 @@ def increment_posts_today(state: dict[str, Any], now: datetime) -> None:
             pass
 
 
-def choose_decision(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] | None, is_new: bool, now: datetime) -> Decision:
+def choose_decision(
+    obs: dict[str, Any],
+    state: dict[str, Any],
+    prev: dict[str, Any] | None,
+    is_new: bool,
+    now: datetime,
+) -> Decision:
     """Decide whether the latest observation should be posted.
 
     The adaptive cadence is based on *observation timestamps*, not the wall-clock time
@@ -584,13 +599,17 @@ def mood(delta: float | None, rate: float) -> str:
 
 
 def change_emoji(delta: float | None) -> str:
-    """Arrow for the previous-rate change: up / flat / down."""
+    """Arrow for the previous-rate change: up / flat / down.
+
+    Use diagonal arrows for up/down because they are easier to distinguish
+    from each other on small smartphone screens.
+    """
     if delta is None:
         return ""
     if delta > 0:
-        return "⬆️"
+        return "↗️"
     if delta < 0:
-        return "⬇️"
+        return "↘️"
     return "➡️"
 
 
@@ -660,6 +679,7 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
     ]
 
     # Show the previous-rate direction with a simple arrow for readability.
+    # Keep +0.0pt visible instead of hiding flat changes.
     if delta_prev is not None:
         change = change_emoji(delta_prev)
         line = f"前回比 {delta_prev:+.1f}pt {change}"
@@ -686,7 +706,7 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
     if obs.get("inflow_m3_s") is not None or obs.get("outflow_m3_s") is not None:
         lines.append(f"流入 {fmt(obs.get('inflow_m3_s'))} / 放流 {fmt(obs.get('outflow_m3_s'))} m³/s")
 
-    if obs.get("rainfall_mm_h") is not None and float(obs["rainfall_mm_h"]) > 0:
+    if obs.get("rainfall_mm_h") is not None:
         lines.append(f"流域平均雨量 {fmt(obs['rainfall_mm_h'])} mm/h")
 
     tags = ["#早明浦ダム", "#吉野川"]
