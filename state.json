@@ -1,19 +1,11 @@
 {
-  "last_observed_at": "2026-09-11T19:00:00+09:00",
-  "last_seen_rate": 8.5,
-  "last_posted_at": "2026-09-11T19:12:34.584096+09:00",
-  "last_posted_observed_at": "2026-09-11T19:00:00+09:00",
-  "last_posted_rate": 8.5,
-  "last_post_id": "2098354023514444089",
+  "last_observed_at": "2026-09-11T20:00:00+09:00",
+  "last_seen_rate": 8.6,
+  "last_posted_at": "2026-09-11T20:12:01.676514+09:00",
+  "last_posted_observed_at": "2026-09-11T20:00:00+09:00",
+  "last_posted_rate": 8.6,
+  "last_post_id": "2098368996634484774",
   "history": [
-    {
-      "observed_at": "2026-09-08T20:00:00+09:00",
-      "rate": 4.9,
-      "storage_thousand_m3": 24060.0,
-      "inflow_m3_s": 12.64,
-      "outflow_m3_s": 0.0,
-      "rainfall_mm_h": 0.3
-    },
     {
       "observed_at": "2026-09-08T21:00:00+09:00",
       "rate": 5.0,
@@ -557,6 +549,14 @@
       "inflow_m3_s": 16.64,
       "outflow_m3_s": 0.0,
       "rainfall_mm_h": 0.0
+    },
+    {
+      "observed_at": "2026-09-11T20:00:00+09:00",
+      "rate": 8.6,
+      "storage_thousand_m3": 29820.0,
+      "inflow_m3_s": 16.89,
+      "outflow_m3_s": 0.0,
+      "rainfall_mm_h": 0.0
     }
   ],
   "report_slots": {},
@@ -567,7 +567,7 @@
     "2026-09-08": 23,
     "2026-09-09": 23,
     "2026-09-10": 23,
-    "2026-09-11": 19
+    "2026-09-11": 20
   },
   "drought_status": {
     "restriction_active": true,
