@@ -34,28 +34,20 @@ WATER_SOURCE_URL = "https://www.water.go.jp/yoshino/yoshino/water_source.html"
 X_POST_URL = "https://api.x.com/2/tweets"
 STATE_PATH = Path(os.getenv("STATE_PATH", "state.json"))
 
-THRESHOLDS = sorted(
-    {
-        float(x)
-        for x in os.getenv("THRESHOLDS", "5,10,15,20,25,30,40,50,60,70,80,90").split(",")
-        if x.strip()
-    }
-)
+THRESHOLDS = sorted({float(x) for x in os.getenv("THRESHOLDS", "5,10,15,20,25,30,40,50,60,70,80,90").split(",") if x.strip()})
 MAX_POSTS_PER_DAY = int(os.getenv("MAX_POSTS_PER_DAY", "30"))
 MIN_POST_INTERVAL_MINUTES = int(os.getenv("MIN_POST_INTERVAL_MINUTES", "20"))
 RAPID_CHANGE_PT = float(os.getenv("RAPID_CHANGE_PT", "1.0"))
 
 # Adaptive cadence. Format: upper_bound:hours. The first matching upper bound wins.
 # Default behavior:
-#   <10%  -> every 1h
-#   <20%  -> every 2h
+#   <30%  -> every 1h
 #   <40%  -> every 3h
 #   <60%  -> every 6h
 #   <80%  -> every 12h
 #   >=80% -> every 24h
 CADENCE_BANDS = [
-    (10.0, float(os.getenv("CADENCE_UNDER_10_HOURS", "1"))),
-    (20.0, float(os.getenv("CADENCE_UNDER_20_HOURS", "2"))),
+    (30.0, float(os.getenv("CADENCE_UNDER_30_HOURS", "1"))),
     (40.0, float(os.getenv("CADENCE_UNDER_40_HOURS", "3"))),
     (60.0, float(os.getenv("CADENCE_UNDER_60_HOURS", "6"))),
     (80.0, float(os.getenv("CADENCE_UNDER_80_HOURS", "12"))),
@@ -65,7 +57,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.7 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.10 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -204,7 +196,7 @@ def fetch_river() -> dict[str, Any]:
             if not rows:
                 raise RuntimeError("river.go.jp: no usable observation rows found")
             return max(rows, key=lambda x: x["observed_at"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001 - deliberately retry all network/parse errors
             last_error = e
             if attempt < 2:
                 time.sleep(1.2 * (attempt + 1))
@@ -276,7 +268,7 @@ def parse_drought_status_text(text: str) -> dict[str, Any] | None:
 
     Historical lines such as ``第一次取水制限`` by themselves do not count.
     We only treat a page as active when it says the restriction is being
-    implemented/continued now. This keeps #渇水 tied to the official status
+    implemented/continued now.  This keeps #渇水 tied to the official status
     rather than an arbitrary reservoir percentage.
     """
     text = clean(text)
@@ -381,10 +373,7 @@ def load_state() -> dict[str, Any]:
 
 
 def save_state(state: dict[str, Any]) -> None:
-    STATE_PATH.write_text(
-        json.dumps(state, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def as_dt(iso: str | None) -> datetime | None:
@@ -483,13 +472,7 @@ def increment_posts_today(state: dict[str, Any], now: datetime) -> None:
             pass
 
 
-def choose_decision(
-    obs: dict[str, Any],
-    state: dict[str, Any],
-    prev: dict[str, Any] | None,
-    is_new: bool,
-    now: datetime,
-) -> Decision:
+def choose_decision(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] | None, is_new: bool, now: datetime) -> Decision:
     """Decide whether the latest observation should be posted.
 
     The adaptive cadence is based on *observation timestamps*, not the wall-clock time
@@ -599,11 +582,7 @@ def mood(delta: float | None, rate: float) -> str:
 
 
 def change_emoji(delta: float | None) -> str:
-    """Arrow for the previous-rate change: up / flat / down.
-
-    Use diagonal arrows for up/down because they are easier to distinguish
-    from each other on small smartphone screens.
-    """
+    """Arrow for the previous-rate change: up / flat / down."""
     if delta is None:
         return ""
     if delta > 0:
@@ -679,7 +658,6 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
     ]
 
     # Show the previous-rate direction with a simple arrow for readability.
-    # Keep +0.0pt visible instead of hiding flat changes.
     if delta_prev is not None:
         change = change_emoji(delta_prev)
         line = f"前回比 {delta_prev:+.1f}pt {change}"
