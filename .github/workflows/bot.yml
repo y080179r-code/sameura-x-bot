@@ -19,12 +19,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -42,8 +42,7 @@ jobs:
           X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
           X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
 
-          CADENCE_UNDER_10_HOURS: "1"
-          CADENCE_UNDER_20_HOURS: "2"
+          CADENCE_UNDER_30_HOURS: "1"
           CADENCE_UNDER_40_HOURS: "3"
           CADENCE_UNDER_60_HOURS: "6"
           CADENCE_UNDER_80_HOURS: "12"
