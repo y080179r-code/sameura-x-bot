@@ -405,3 +405,44 @@ class TestModeSwitchV411(unittest.TestCase):
         )
         self.assertTrue(allowed)
         self.assertEqual(reason, "auto mode")
+
+
+class TestNightForcedAutoV414(unittest.TestCase):
+    def test_forced_auto_window(self):
+        self.assertTrue(bot.is_forced_auto_time(datetime(2026, 9, 14, 23, 0, tzinfo=JST)))
+        self.assertTrue(bot.is_forced_auto_time(datetime(2026, 9, 15, 0, 30, tzinfo=JST)))
+        self.assertTrue(bot.is_forced_auto_time(datetime(2026, 9, 15, 6, 59, tzinfo=JST)))
+        self.assertFalse(bot.is_forced_auto_time(datetime(2026, 9, 15, 7, 0, tzinfo=JST)))
+        self.assertFalse(bot.is_forced_auto_time(datetime(2026, 9, 14, 22, 59, tzinfo=JST)))
+
+    def test_manual_is_forced_to_auto_at_night(self):
+        mode = {"mode": "manual", "changed_at": "2026-09-14T12:00:00+00:00"}
+        new_mode, changed = bot.apply_forced_auto(
+            mode, datetime(2026, 9, 14, 23, 3, tzinfo=JST)
+        )
+        self.assertTrue(changed)
+        self.assertEqual(new_mode["mode"], "auto")
+        self.assertEqual(new_mode["changed_at"], "2026-09-14T22:59:59+09:00")
+
+    def test_night_takeover_skips_old_row_but_allows_23_row(self):
+        mode, changed = bot.apply_forced_auto(
+            {"mode": "manual", "changed_at": None},
+            datetime(2026, 9, 14, 23, 3, tzinfo=JST),
+        )
+        self.assertTrue(changed)
+        old_allowed, _ = bot.mode_allows_post(
+            mode, datetime(2026, 9, 14, 22, 0, tzinfo=JST)
+        )
+        new_allowed, _ = bot.mode_allows_post(
+            mode, datetime(2026, 9, 14, 23, 0, tzinfo=JST)
+        )
+        self.assertFalse(old_allowed)
+        self.assertTrue(new_allowed)
+
+    def test_daytime_manual_is_unchanged(self):
+        mode = {"mode": "manual", "changed_at": "2026-09-15T00:00:00+09:00"}
+        new_mode, changed = bot.apply_forced_auto(
+            mode, datetime(2026, 9, 15, 12, 0, tzinfo=JST)
+        )
+        self.assertFalse(changed)
+        self.assertEqual(new_mode, mode)
