@@ -1,407 +1,986 @@
+#!/usr/bin/env python3
+"""Sameura Dam storage-rate bot for X.
+
+- Polls the official MLIT river.go.jp page.
+- Falls back to Water Resources Agency daily snapshot.
+- Uses adaptive posting frequency based on the current storage rate.
+- Posts threshold crossings and unusually large moves immediately.
+- Keeps source URLs OUT of automated posts to avoid URL-priced posts.
+- Persists a small rolling history in state.json for 24h deltas.
+"""
+
+from __future__ import annotations
+
+import json
 import os
-import tempfile
-import unittest
+import re
+import sys
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
-os.environ.setdefault("STATE_PATH", tempfile.mktemp())
-os.environ.setdefault("DRY_RUN", "true")
-
-import bot  # noqa: E402
+import requests
+from bs4 import BeautifulSoup
 
 JST = ZoneInfo("Asia/Tokyo")
 
+RIVER_URL = "https://www1.river.go.jp/cgi-bin/DspDamData.exe?ID=1368080700010&KIND=3"
+WATER_URL = "https://www.water.go.jp/yoshino/yoshino/"
+WATER_SOURCE_URL = "https://www.water.go.jp/yoshino/yoshino/water_source.html"
+X_POST_URL = "https://api.x.com/2/tweets"
+STATE_PATH = Path(os.getenv("STATE_PATH", "state.json"))
+MODE_PATH = Path(os.getenv("BOT_MODE_PATH", "bot_mode.json"))
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
-class BotTests(unittest.TestCase):
-    def test_threshold_down(self):
-        self.assertEqual(bot.crossed_threshold(10.1, 9.9), ("down", 10.0))
+THRESHOLDS = sorted({float(x) for x in os.getenv("THRESHOLDS", "5,10,15,20,25,30,40,50,60,70,80,90").split(",") if x.strip()})
+MAX_POSTS_PER_DAY = int(os.getenv("MAX_POSTS_PER_DAY", "30"))
+MIN_POST_INTERVAL_MINUTES = int(os.getenv("MIN_POST_INTERVAL_MINUTES", "20"))
+RAPID_CHANGE_PT = float(os.getenv("RAPID_CHANGE_PT", "1.0"))
 
-    def test_threshold_up(self):
-        self.assertEqual(bot.crossed_threshold(9.9, 10.1), ("up", 10.0))
+# Adaptive cadence. Format: upper_bound:hours. The first matching upper bound wins.
+# Default behavior:
+#   <30%  -> every 1h
+#   <40%  -> every 3h
+#   <60%  -> every 6h
+#   <80%  -> every 12h
+#   >=80% -> every 24h
+CADENCE_BANDS = [
+    (30.0, float(os.getenv("CADENCE_UNDER_30_HOURS", "1"))),
+    (40.0, float(os.getenv("CADENCE_UNDER_40_HOURS", "3"))),
+    (60.0, float(os.getenv("CADENCE_UNDER_60_HOURS", "6"))),
+    (80.0, float(os.getenv("CADENCE_UNDER_80_HOURS", "12"))),
+    (float("inf"), float(os.getenv("CADENCE_80_PLUS_HOURS", "24"))),
+]
+DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
+FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
-    def test_adaptive_cadence(self):
-        cases = [
-            (5.0, 1.0),
-            (9.9, 1.0),
-            (10.0, 1.0),
-            (19.9, 1.0),
-            (20.0, 1.0),
-            (29.9, 1.0),
-            (30.0, 3.0),
-            (39.9, 3.0),
-            (40.0, 6.0),
-            (59.9, 6.0),
-            (60.0, 12.0),
-            (79.9, 12.0),
-            (80.0, 24.0),
-            (100.0, 24.0),
-        ]
-        for rate, expected in cases:
-            with self.subTest(rate=rate):
-                self.assertEqual(bot.cadence_hours(rate), expected)
+HEADERS = {
+    "User-Agent": "SameuraReservoirBot/4.14 (public-interest dam status bot)",
+    "Accept-Language": "ja,en;q=0.5",
+}
 
-    def test_high_rate_waits_24h_of_observation_time(self):
-        now = datetime(2026, 9, 5, 12, 7, tzinfo=JST)
-        obs = {"observed_at": "2026-09-05T12:00:00+09:00", "rate": 85.0}
-        prev = {"observed_at": "2026-09-05T11:00:00+09:00", "rate": 85.0}
-        state = bot.default_state()
-        state["last_posted_at"] = datetime(2026, 9, 5, 10, 0, tzinfo=JST).isoformat()
-        state["last_posted_observed_at"] = "2026-09-04T13:00:00+09:00"  # 23h ago
-        state["last_posted_rate"] = 85.0
-        d = bot.choose_decision(obs, state, prev, True, now)
-        self.assertFalse(d.post)
 
-        state["last_posted_observed_at"] = "2026-09-04T12:00:00+09:00"  # 24h ago
-        d = bot.choose_decision(obs, state, prev, True, now)
-        self.assertTrue(d.post)
-        self.assertIn("24時間", d.reason)
+@dataclass
+class Decision:
+    post: bool
+    reason: str
+    kind: str = "regular"  # regular / rapid / threshold / first / forced
+    threshold: float | None = None
+    threshold_direction: str | None = None
+    report_hour: int | None = None
 
-    def test_under_10_uses_observation_time_not_post_time(self):
-        # The 11:00 observation was posted late at 11:55. When the 12:00 observation
-        # appears at 12:07, it should still post because the DATA is one hour newer.
-        now = datetime(2026, 9, 5, 12, 7, tzinfo=JST)
-        obs = {"observed_at": "2026-09-05T12:00:00+09:00", "rate": 8.7}
-        prev = {"observed_at": "2026-09-05T11:00:00+09:00", "rate": 8.7}
-        state = bot.default_state()
-        state["last_posted_observed_at"] = "2026-09-05T11:00:00+09:00"
-        state["last_posted_rate"] = 8.7
-        state["last_posted_at"] = datetime(2026, 9, 5, 11, 55, tzinfo=JST).isoformat()
 
-        # The 20-minute anti-burst guard still wins initially.
-        self.assertFalse(bot.choose_decision(obs, state, prev, True, now).post)
+def clean(s: str | None) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
 
-        # At the next poll the SAME 12:00 observation is still eligible even though
-        # update_history would report is_new=False. It is not lost.
-        now2 = datetime(2026, 9, 5, 12, 37, tzinfo=JST)
-        d = bot.choose_decision(obs, state, obs, False, now2)
-        self.assertTrue(d.post)
-        self.assertIn("1時間ごと", d.reason)
 
-    def test_under_10_posts_next_hour_even_if_previous_post_was_late(self):
-        now = datetime(2026, 9, 5, 19, 37, tzinfo=JST)
-        obs = {"observed_at": "2026-09-05T19:00:00+09:00", "rate": 8.7}
-        prev = {"observed_at": "2026-09-05T18:00:00+09:00", "rate": 8.8}
-        state = bot.default_state()
-        state["last_posted_observed_at"] = "2026-09-05T18:00:00+09:00"
-        state["last_posted_rate"] = 8.8
-        # 18:00 data happened to be posted at 19:05. Wall-clock cadence would skip
-        # 19:00; observation-time cadence must post it at 19:37.
-        state["last_posted_at"] = datetime(2026, 9, 5, 19, 5, tzinfo=JST).isoformat()
-        d = bot.choose_decision(obs, state, prev, False, now)
-        self.assertTrue(d.post)
-        self.assertEqual(d.kind, "regular")
+def number(s: str | None) -> float | None:
+    if s is None:
+        return None
+    s = clean(s).replace(",", "").replace("％", "").replace("%", "")
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    return float(m.group()) if m else None
 
-    def test_rapid_change_overrides_slow_cadence(self):
-        now = datetime(2026, 9, 5, 12, 0, tzinfo=JST)
-        obs = {"observed_at": "2026-09-05T12:00:00+09:00", "rate": 86.2}
-        prev = {"observed_at": "2026-09-05T11:00:00+09:00", "rate": 86.1}
-        state = bot.default_state()
-        state["last_posted_observed_at"] = "2026-09-05T10:00:00+09:00"
-        state["last_posted_rate"] = 85.0
-        state["last_posted_at"] = (now - timedelta(hours=2)).isoformat()
-        d = bot.choose_decision(obs, state, prev, True, now)
-        self.assertTrue(d.post)
-        self.assertEqual(d.kind, "rapid")
 
-    def test_post_has_no_url(self):
-        obs = {
-            "observed_at": "2026-09-05T08:00:00+09:00",
-            "rate": 8.7,
-            "rainfall_mm_h": 0.0,
-            "storage_thousand_m3": 12789.0,
-            "inflow_m3_s": 4.8,
-            "outflow_m3_s": 18.1,
-            "source": "国土交通省 川の防災情報",
-            "source_url": bot.RIVER_URL,
-            "source_kind": "realtime",
+def parse_date(text: str, now: datetime) -> tuple[int, int, int] | None:
+    text = clean(text)
+    m = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", text)
+    if m:
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+    m = re.fullmatch(r"(\d{1,2})[/-](\d{1,2})", text)
+    if not m:
+        return None
+    month, day = int(m.group(1)), int(m.group(2))
+    year = now.year
+    if now.month == 1 and month == 12:
+        year -= 1
+    elif now.month == 12 and month == 1:
+        year += 1
+    return year, month, day
+
+
+def _extract_river_rows(html: bytes, now: datetime) -> list[dict[str, Any]]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates: list[dict[str, Any]] = []
+    current_date: tuple[int, int, int] | None = None
+
+    for tr in soup.find_all("tr"):
+        cells = [clean(x.get_text(" ", strip=True)) for x in tr.find_all(["td", "th"])]
+        cells = [c for c in cells if c]
+        if not cells:
+            continue
+
+        for c in cells[:2]:
+            parsed = parse_date(c, now)
+            if parsed:
+                current_date = parsed
+                break
+
+        time_idx = None
+        hh = mm = None
+        for i, c in enumerate(cells):
+            m = re.fullmatch(r"(\d{1,2}):(\d{2})", c)
+            if m:
+                time_idx = i
+                hh, mm = int(m.group(1)), int(m.group(2))
+                break
+
+        if time_idx is None or current_date is None or hh is None or mm is None:
+            continue
+
+        # Standard table order after time:
+        # 流域平均雨量, 貯水量, 流入量, 放流量, 貯水率
+        vals = cells[time_idx + 1 :]
+        if len(vals) < 5:
+            continue
+
+        rainfall = number(vals[0])
+        storage = number(vals[1])
+        inflow = number(vals[2])
+        outflow = number(vals[3])
+        rate = number(vals[4])
+        if rate is None or not 0 <= rate <= 100:
+            continue
+
+        y, mo, da = current_date
+        try:
+            observed = datetime(y, mo, da, hh, mm, tzinfo=JST)
+        except ValueError:
+            continue
+
+        candidates.append(
+            {
+                "observed_at": observed.isoformat(),
+                "rate": rate,
+                "rainfall_mm_h": rainfall,
+                "storage_thousand_m3": storage,
+                "inflow_m3_s": inflow,
+                "outflow_m3_s": outflow,
+                "source": "国土交通省 川の防災情報",
+                "source_url": RIVER_URL,
+                "source_kind": "realtime",
+            }
+        )
+
+    return candidates
+
+
+def fetch_river() -> dict[str, Any]:
+    """Fetch real-time table. Re-fetches the parent page if its temporary iframe expires."""
+    now = datetime.now(JST)
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    last_error: Exception | None = None
+
+    for attempt in range(3):
+        try:
+            parent_r = s.get(RIVER_URL, timeout=20)
+            parent_r.raise_for_status()
+            parent = BeautifulSoup(parent_r.content, "html.parser")
+
+            iframe = parent.find("iframe")
+            if not iframe or not iframe.get("src"):
+                # Some renderings may inline the table. Try the parent itself first.
+                rows = _extract_river_rows(parent_r.content, now)
+                if rows:
+                    return max(rows, key=lambda x: x["observed_at"])
+                raise RuntimeError("river.go.jp: data iframe not found")
+
+            data_url = urljoin(RIVER_URL, iframe["src"])
+            data_r = s.get(data_url, timeout=20)
+            data_r.raise_for_status()
+            rows = _extract_river_rows(data_r.content, now)
+            if not rows:
+                raise RuntimeError("river.go.jp: no usable observation rows found")
+            return max(rows, key=lambda x: x["observed_at"])
+        except Exception as e:  # noqa: BLE001 - deliberately retry all network/parse errors
+            last_error = e
+            if attempt < 2:
+                time.sleep(1.2 * (attempt + 1))
+
+    raise RuntimeError(f"river.go.jp failed after retries: {last_error}")
+
+
+def fetch_water_fallback() -> dict[str, Any]:
+    """Fallback: Water Resources Agency page. Usually a daily 00:00 snapshot."""
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    r = s.get(WATER_URL, timeout=20)
+    r.raise_for_status()
+    soup = BeautifulSoup(r.content, "html.parser")
+    text = clean(soup.get_text(" ", strip=True))
+
+    mt = re.search(
+        r"貯水率情報[（(]\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*(\d{1,2})時現在\s*[）)]",
+        text,
+    )
+    if mt:
+        y, mo, da, hh = map(int, mt.groups())
+        observed = datetime(y, mo, da, hh, 0, tzinfo=JST)
+    else:
+        observed = datetime.now(JST).replace(minute=0, second=0, microsecond=0)
+
+    mr = re.search(r"早明浦ダム\s+(\d+(?:\.\d+)?)\s*%", text)
+    if not mr:
+        raise RuntimeError("water.go.jp fallback: storage rate not found")
+
+    return {
+        "observed_at": observed.isoformat(),
+        "rate": float(mr.group(1)),
+        "rainfall_mm_h": None,
+        "storage_thousand_m3": None,
+        "inflow_m3_s": None,
+        "outflow_m3_s": None,
+        "source": "水資源機構 吉野川本部",
+        "source_url": WATER_URL,
+        "source_kind": "daily_fallback",
+    }
+
+
+def fetch_observation() -> dict[str, Any]:
+    try:
+        return fetch_river()
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] real-time source failed: {e}", file=sys.stderr)
+        return fetch_water_fallback()
+
+
+def _restriction_level(text: str) -> str | None:
+    """Extract strings such as 第四次 from nearby current restriction wording."""
+    level = r"第[一二三四五六七八九十]+次"
+    patterns = [
+        rf"({level})取水制限[^。\n]{{0,60}}(?:実施されています|継続中)",
+        rf"(?:実施されています|継続中)[^。\n]{{0,60}}({level})取水制限",
+        rf"継続中\s*({level})取水制限",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def parse_drought_status_text(text: str) -> dict[str, Any] | None:
+    """Parse explicit *current* Yoshinogawa intake-restriction wording.
+
+    Historical lines such as ``第一次取水制限`` by themselves do not count.
+    We only treat a page as active when it says the restriction is being
+    implemented/continued now.  This keeps #渇水 tied to the official status
+    rather than an arbitrary reservoir percentage.
+    """
+    text = clean(text)
+
+    active_patterns = [
+        r"取水制限が実施されています",
+        r"継続中[^。\n]{0,80}取水制限",
+        r"取水制限[^。\n]{0,80}継続中",
+    ]
+    if any(re.search(p, text) for p in active_patterns):
+        return {
+            "restriction_active": True,
+            "restriction_level": _restriction_level(text),
         }
-        prev = {"observed_at": "2026-09-05T07:00:00+09:00", "rate": 8.8}
-        state = bot.default_state()
-        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
-        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertNotIn("http://", text)
-        self.assertNotIn("https://", text)
-        self.assertIn("8.7%", text)
-        self.assertIn("流域平均雨量 0 mm/h", text)
-        self.assertLess(len(text), 280)
 
-
-    def test_low_rate_display_has_siren_before_rate_and_water_drop(self):
-        obs = {
-            "observed_at": "2026-09-05T19:00:00+09:00",
-            "rate": 8.8,
-            "rainfall_mm_h": 0.0,
-            "storage_thousand_m3": 29690.0,
-            "inflow_m3_s": 11.5,
-            "outflow_m3_s": 41.6,
-            "source": "国土交通省 川の防災情報",
-            "source_url": bot.RIVER_URL,
-            "source_kind": "realtime",
+    # Explicit release wording wins only when no active marker was found above.
+    if re.search(r"取水制限[^。\n]{0,80}解除|解除[^。\n]{0,80}取水制限", text):
+        return {
+            "restriction_active": False,
+            "restriction_level": None,
         }
-        prev = {"observed_at": "2026-09-05T18:00:00+09:00", "rate": 8.9}
-        state = bot.default_state()
-        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
-        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertIn("🚨 8.8% 💧", text)
-        self.assertIn("前回比 -0.1pt ↘️", text)
-        self.assertIn("貯水量 29,690×10³m³", text)
 
-    def test_extract_river_rows(self):
-        html = b"""
-        <table>
-          <tr><td>2026/09/05</td><td>08:00</td><td>0.0</td><td>12789</td><td>4.8</td><td>18.1</td><td>8.7</td></tr>
-          <tr><td></td><td>09:00</td><td>1.2</td><td>12840</td><td>20.1</td><td>18.0</td><td>8.8</td></tr>
-        </table>
-        """
-        rows = bot._extract_river_rows(html, datetime(2026, 9, 5, 9, 7, tzinfo=JST))
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[-1]["rate"], 8.8)
-        self.assertEqual(rows[-1]["observed_at"], "2026-09-05T09:00:00+09:00")
+    return None
 
 
+def fetch_drought_status() -> dict[str, Any]:
+    """Get the official current Yoshinogawa intake-restriction status.
 
-class TestDiscordManualV413(unittest.TestCase):
-    def test_manual_switch_can_notify_latest_observation_immediately(self):
-        # MANUAL is enabled at 18:30, but the latest official value is the 18:00 row.
-        # It should still be sent immediately if Discord has not received it yet.
-        obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
-        state = bot.default_state()
-        prev = {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4}
-        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}  # 18:30 JST
-        d = bot.choose_manual_notification(obs, state, prev, mode)
-        self.assertTrue(d.post)
-        self.assertEqual(d.kind, "regular")
-        self.assertIn("latest observation", d.reason)
+    The top page currently carries a plain-language banner while the detailed
+    water-source page carries entries such as ``継続中 第四次取水制限``.
+    We check both so small layout/text changes on one page do not break #渇水.
+    """
+    s = requests.Session()
+    s.headers.update(HEADERS)
+
+    pages: list[tuple[str, str]] = []
+    errors: list[str] = []
+    for url in (WATER_URL, WATER_SOURCE_URL):
+        try:
+            r = s.get(url, timeout=20)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.content, "html.parser")
+            pages.append((url, clean(soup.get_text(" ", strip=True))))
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{url}: {e}")
+
+    if not pages:
+        raise RuntimeError("drought-status pages unavailable: " + " | ".join(errors))
+
+    # Any explicit current-active marker takes precedence.
+    for url, text in pages:
+        parsed = parse_drought_status_text(text)
+        if parsed and parsed["restriction_active"]:
+            parsed["source_url"] = url
+            return parsed
+
+    # If an explicit release marker appears, treat the restriction as ended.
+    for url, text in pages:
+        parsed = parse_drought_status_text(text)
+        if parsed and parsed["restriction_active"] is False:
+            parsed["source_url"] = url
+            return parsed
+
+    # The official pages were reachable but no current restriction marker exists.
+    return {
+        "restriction_active": False,
+        "restriction_level": None,
+        "source_url": WATER_SOURCE_URL,
+    }
 
 
-    def test_manual_same_latest_observation_is_not_sent_twice(self):
-        obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
-        state = bot.default_state()
-        state["last_discord_notified_observed_at"] = "2026-09-14T18:00:00+09:00"
-        state["last_discord_notified_rate"] = 10.5
-        prev = {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4}
-        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}
-        d = bot.choose_manual_notification(obs, state, prev, mode)
-        self.assertFalse(d.post)
-        self.assertIn("already notified", d.reason)
+def default_state() -> dict[str, Any]:
+    return {
+        "last_observed_at": None,
+        "last_seen_rate": None,
+        "last_posted_at": None,
+        "last_posted_observed_at": None,
+        "last_posted_rate": None,
+        "last_post_id": None,
+        "last_discord_notified_at": None,
+        "last_discord_notified_observed_at": None,
+        "last_discord_notified_rate": None,
+        "history": [],
+        "report_slots": {},
+        "daily_post_counts": {},
+        "drought_status": {
+            "restriction_active": None,
+            "restriction_level": None,
+            "source_url": WATER_SOURCE_URL,
+        },
+    }
 
-    def test_repeat_poll_returns_previous_distinct_observation(self):
-        state = bot.default_state()
-        state["history"] = [
-            {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4},
-            {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5},
-        ]
-        obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
-        prev, is_new = bot.update_history(state, obs)
-        self.assertFalse(is_new)
-        self.assertIsNotNone(prev)
-        self.assertEqual(prev["observed_at"], "2026-09-14T17:00:00+09:00")
-        self.assertEqual(prev["rate"], 10.4)
 
-    def test_manual_first_new_observation_notifies(self):
-        obs = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
-        state = bot.default_state()
-        prev = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
-        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}  # 18:30 JST
-        d = bot.choose_manual_notification(obs, state, prev, mode)
-        self.assertTrue(d.post)
-        self.assertEqual(d.kind, "regular")
+def load_state() -> dict[str, Any]:
+    state = default_state()
+    if not STATE_PATH.exists():
+        return state
+    try:
+        loaded = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            state.update(loaded)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] failed to read state.json: {e}", file=sys.stderr)
+    return state
 
-    def test_manual_does_not_repeat_same_observation(self):
-        obs = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
-        state = bot.default_state()
-        state["last_discord_notified_observed_at"] = "2026-09-14T19:00:00+09:00"
-        state["last_discord_notified_rate"] = 10.6
-        prev = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
-        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}
-        d = bot.choose_manual_notification(obs, state, prev, mode)
-        self.assertFalse(d.post)
-        self.assertIn("already notified", d.reason)
 
-    def test_manual_under_30_notifies_next_hour(self):
-        obs = {"observed_at": "2026-09-14T20:00:00+09:00", "rate": 10.7}
-        state = bot.default_state()
-        state["last_discord_notified_observed_at"] = "2026-09-14T19:00:00+09:00"
-        state["last_discord_notified_rate"] = 10.6
-        prev = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
-        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}
-        d = bot.choose_manual_notification(obs, state, prev, mode)
-        self.assertTrue(d.post)
-        self.assertIn("1時間ごと", d.reason)
+def save_state(state: dict[str, Any]) -> None:
+    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    def test_discord_draft_is_same_text_as_x_draft(self):
-        obs = {
-            "observed_at": "2026-09-14T20:00:00+09:00",
-            "rate": 10.7,
-            "rainfall_mm_h": 0.0,
-            "storage_thousand_m3": 30000.0,
-            "inflow_m3_s": 8.0,
-            "outflow_m3_s": 0.0,
-            "drought_restriction_active": True,
+
+def load_bot_mode() -> dict[str, Any]:
+    """Read AUTO/MANUAL mode from bot_mode.json.
+
+    Missing file defaults to AUTO for backward compatibility.
+    A malformed file fails safe to MANUAL so the bot does not post unexpectedly.
+    """
+    if not MODE_PATH.exists():
+        return {"mode": "auto", "changed_at": None}
+
+    try:
+        data = json.loads(MODE_PATH.read_text(encoding="utf-8"))
+        mode = str(data.get("mode", "auto")).strip().lower()
+        if mode not in {"auto", "manual"}:
+            raise ValueError(f"unknown bot mode: {mode}")
+        return {
+            "mode": mode,
+            "changed_at": data.get("changed_at"),
         }
-        prev = {
-            "observed_at": "2026-09-14T19:00:00+09:00",
-            "rate": 10.6,
-            "storage_thousand_m3": 29900.0,
-        }
-        state = bot.default_state()
-        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
-        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertIn("前回比 +0.1pt ↗️", text)
-        self.assertIn("流域平均雨量 0 mm/h", text)
-        self.assertIn("#早明浦ダム #吉野川 #渇水", text)
-        self.assertNotIn("DISCORD", text)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] failed to read bot_mode.json: {e}; using MANUAL for safety", file=sys.stderr)
+        return {"mode": "manual", "changed_at": None}
+
+
+def is_forced_auto_time(now: datetime) -> bool:
+    """Return True during the nightly forced-AUTO window (23:00-07:00 JST)."""
+    local = now.astimezone(JST)
+    return local.hour >= 23 or local.hour < 7
+
+
+def forced_auto_start(now: datetime) -> datetime:
+    """Return the 23:00 JST boundary that started the current forced-AUTO window."""
+    local = now.astimezone(JST)
+    if local.hour >= 23:
+        return local.replace(hour=23, minute=0, second=0, microsecond=0)
+    previous_day = local - timedelta(days=1)
+    return previous_day.replace(hour=23, minute=0, second=0, microsecond=0)
+
+
+def apply_forced_auto(mode_config: dict[str, Any], now: datetime) -> tuple[dict[str, Any], bool]:
+    """Force MANUAL -> AUTO during 23:00-07:00 JST.
+
+    The generated changed_at is one second before 23:00 so the 23:00 official
+    observation itself is eligible for automatic posting, while older rows are skipped.
+    Once written to bot_mode.json, AUTO remains active after 07:00 until the user
+    explicitly presses the MANUAL button again.
+    """
+    if not is_forced_auto_time(now):
+        return mode_config, False
+
+    mode = str(mode_config.get("mode", "auto")).strip().lower()
+    if mode != "manual":
+        return mode_config, False
+
+    boundary = forced_auto_start(now) - timedelta(seconds=1)
+    return {"mode": "auto", "changed_at": boundary.isoformat()}, True
+
+
+def save_bot_mode(mode_config: dict[str, Any]) -> None:
+    """Persist AUTO/MANUAL mode so the nightly AUTO switch survives after 07:00."""
+    MODE_PATH.write_text(
+        json.dumps(mode_config, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def mode_allows_post(mode_config: dict[str, Any], observed: datetime) -> tuple[bool, str]:
+    """Return whether X posting is allowed for the current mode.
+
+    MANUAL mode keeps polling and updating history, but never posts automatically.
+    When switching back to AUTO, observations at/before the switch time are skipped.
+    That prevents the bot from immediately duplicating the last observation the user
+    may just have posted manually. The next new official observation posts normally.
+    """
+    mode = str(mode_config.get("mode", "auto")).strip().lower()
+    if mode == "manual":
+        return False, "manual mode"
+
+    changed_at = as_dt(mode_config.get("changed_at"))
+    if changed_at is not None and observed <= changed_at:
+        return False, "waiting for first new observation after AUTO resume"
+
+    return True, "auto mode"
+
+
+def choose_manual_notification(
+    obs: dict[str, Any],
+    state: dict[str, Any],
+    prev: dict[str, Any] | None,
+    mode_config: dict[str, Any],
+) -> Decision:
+    """Decide whether MANUAL mode should send a copy-ready Discord draft.
+
+    When MANUAL mode is enabled, the latest official observation is eligible
+    immediately even if that observation was published before the mode switch.
+    This makes the switch useful as an instant "give me the latest draft" button.
+
+    Duplicate protection is based on the last observation actually sent to Discord,
+    so re-running the workflow never sends the same official observation twice.
+    """
+    _ = mode_config  # The switch timestamp intentionally does not gate Discord drafts.
+
+    observed = as_dt(obs.get("observed_at"))
+    if observed is None:
+        return Decision(False, "invalid observation time")
+
+    last_notified_observed = as_dt(state.get("last_discord_notified_observed_at"))
+    last_notified_rate = state.get("last_discord_notified_rate")
+
+    if last_notified_observed is not None and observed <= last_notified_observed:
+        return Decision(False, "Discord already notified for this observation")
+
+    # If Discord has never received a draft (or the only draft is older), the latest
+    # observation can be sent immediately, regardless of when MANUAL mode was enabled.
+    if last_notified_observed is None:
+        old_rate = float(prev["rate"]) if prev and prev.get("rate") is not None else None
+        crossing = crossed_threshold(old_rate, float(obs["rate"]))
+        if crossing:
+            direction, threshold = crossing
+            return Decision(True, f"manual threshold {threshold}% {direction}", "threshold", threshold, direction)
+        if old_rate is not None:
+            move = float(obs["rate"]) - old_rate
+            if abs(move) >= RAPID_CHANGE_PT:
+                return Decision(True, f"manual rapid change {move:+.1f}pt", "rapid")
+        return Decision(True, "latest observation in manual mode", "regular")
+
+    current_rate = float(obs["rate"])
+    old_rate = float(last_notified_rate) if last_notified_rate is not None else None
+
+    crossing = crossed_threshold(old_rate, current_rate)
+    if crossing:
+        direction, threshold = crossing
+        return Decision(True, f"manual threshold {threshold}% {direction}", "threshold", threshold, direction)
+
+    if old_rate is not None:
+        move = current_rate - old_rate
+        if abs(move) >= RAPID_CHANGE_PT:
+            return Decision(True, f"manual rapid change {move:+.1f}pt", "rapid")
+
+    interval = timedelta(hours=cadence_hours(current_rate))
+    if observed - last_notified_observed >= interval:
+        return Decision(True, f"manual observation cadence {cadence_label(current_rate)}", "regular")
+
+    return Decision(False, f"waiting for manual observation cadence ({cadence_label(current_rate)})")
+
+
+def send_discord_draft(text: str) -> None:
+    """Send the exact X draft to Discord as plain text for easy copy/paste."""
+    if not DISCORD_WEBHOOK_URL:
+        raise RuntimeError("DISCORD_WEBHOOK_URL is not configured")
+
+    # Keep the Discord message itself identical to the X draft. No prefix/suffix,
+    # so the user can copy the whole message and paste it straight into X.
+    payload = {
+        "content": text,
+        "allowed_mentions": {"parse": []},
+    }
+    r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=20)
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"Discord webhook error {r.status_code}: {r.text}")
+
+
+def as_dt(iso: str | None) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso).astimezone(JST)
+    except ValueError:
+        return None
+
+
+def update_history(state: dict[str, Any], obs: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+    history = state.setdefault("history", [])
+    is_new = not history or history[-1].get("observed_at") != obs["observed_at"]
+
+    # `prev` must mean the previous DISTINCT official observation.
+    # If the same observation is polled again, history[-1] is the current value,
+    # so use history[-2]. This keeps the displayed 前回比 correct when a draft is
+    # sent later for an observation the bot has already seen once.
+    if is_new:
+        prev = history[-1] if history else None
+        history.append(
+            {
+                "observed_at": obs["observed_at"],
+                "rate": obs["rate"],
+                "storage_thousand_m3": obs.get("storage_thousand_m3"),
+                "inflow_m3_s": obs.get("inflow_m3_s"),
+                "outflow_m3_s": obs.get("outflow_m3_s"),
+                "rainfall_mm_h": obs.get("rainfall_mm_h"),
+            }
+        )
+    else:
+        prev = history[-2] if len(history) >= 2 else None
+
+    cutoff = datetime.now(JST) - timedelta(hours=72)
+    history[:] = [x for x in history if (as_dt(x.get("observed_at")) or cutoff) >= cutoff]
+    return prev, is_new
+
+
+def find_24h_reference(state: dict[str, Any], observed: datetime) -> dict[str, Any] | None:
+    target = observed - timedelta(hours=24)
+    history = state.get("history", [])
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for item in history:
+        dt = as_dt(item.get("observed_at"))
+        if not dt or dt >= observed:
+            continue
+        distance = abs((dt - target).total_seconds())
+        # Accept observations roughly 18–30h behind.
+        age = (observed - dt).total_seconds() / 3600
+        if 18 <= age <= 30:
+            candidates.append((distance, item))
+    return min(candidates, key=lambda x: x[0])[1] if candidates else None
+
+
+def crossed_threshold(old: float | None, new: float) -> tuple[str, float] | None:
+    if old is None:
+        return None
+    # On a large jump, prefer the threshold nearest the new value.
+    crossed: list[tuple[str, float]] = []
+    for t in THRESHOLDS:
+        if old >= t > new:
+            crossed.append(("down", t))
+        elif old < t <= new:
+            crossed.append(("up", t))
+    if not crossed:
+        return None
+    return crossed[-1] if new > old else crossed[0]
+
+
+def cadence_hours(rate: float) -> float:
+    """Return normal posting interval for the current storage rate."""
+    for upper_bound, hours in CADENCE_BANDS:
+        if rate < upper_bound:
+            return hours
+    return 24.0
+
+
+def cadence_label(rate: float) -> str:
+    hours = cadence_hours(rate)
+    if hours == 1:
+        return "1時間ごと"
+    if hours < 1:
+        return f"{int(hours * 60)}分ごと"
+    return f"{hours:g}時間ごと"
+
+
+def posts_today(state: dict[str, Any], now: datetime) -> int:
+    return int(state.get("daily_post_counts", {}).get(now.strftime("%Y-%m-%d"), 0))
+
+
+def increment_posts_today(state: dict[str, Any], now: datetime) -> None:
+    key = now.strftime("%Y-%m-%d")
+    counts = state.setdefault("daily_post_counts", {})
+    counts[key] = int(counts.get(key, 0)) + 1
+    for old_key in list(counts):
+        try:
+            d = datetime.strptime(old_key, "%Y-%m-%d").date()
+            if (now.date() - d).days > 7:
+                del counts[old_key]
+        except ValueError:
+            pass
+
+
+def choose_decision(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] | None, is_new: bool, now: datetime) -> Decision:
+    """Decide whether the latest observation should be posted.
+
+    The adaptive cadence is based on *observation timestamps*, not the wall-clock time
+    when the previous X post happened. This matters especially below 10%: if the bot
+    posts the 18:00 observation at 19:05, the 19:00 observation can still be posted as
+    soon as it is seen instead of waiting until 20:05.
+
+    `is_new` tells us whether this run appended the observation to history, but an
+    observation may have been seen earlier and intentionally not posted (for example
+    because the minimum post interval was still active). Therefore we also compare the
+    current observation against `last_posted_observed_at` so an eligible observation is
+    not lost on the next poll.
+    """
+    if FORCE_POST:
+        return Decision(True, "FORCE_POST", "forced")
+
+    if posts_today(state, now) >= MAX_POSTS_PER_DAY:
+        return Decision(False, "daily safety cap reached")
+
+    rate = float(obs["rate"])
+    observed = as_dt(obs.get("observed_at"))
+    last_posted = as_dt(state.get("last_posted_at"))
+    last_posted_observed = as_dt(state.get("last_posted_observed_at"))
+    last_posted_rate = state.get("last_posted_rate")
+
+    # First ever successful post.
+    if last_posted_observed is None:
+        return Decision(True, "first observation", "first")
+
+    # Nothing newer than the observation already posted.
+    if observed is None or observed <= last_posted_observed:
+        return Decision(False, "no newer observation")
+
+    # Safety against accidental bursts. This may defer a new observation, but because
+    # the cadence check below uses last_posted_observed_at, the observation remains
+    # eligible on the next poll instead of being permanently skipped.
+    if last_posted and (now - last_posted) < timedelta(minutes=MIN_POST_INTERVAL_MINUTES):
+        return Decision(False, "minimum post interval")
+
+    # Compare with the last *posted* rate so a threshold crossing or rapid move that was
+    # first seen during the minimum interval can still be announced on the next poll.
+    old_posted_rate = float(last_posted_rate) if last_posted_rate is not None else None
+
+    crossing = crossed_threshold(old_posted_rate, rate)
+    if crossing:
+        direction, threshold = crossing
+        return Decision(True, f"crossed {threshold}% {direction}", "threshold", threshold, direction)
+
+    if old_posted_rate is not None:
+        move = rate - old_posted_rate
+        if abs(move) >= RAPID_CHANGE_PT:
+            return Decision(True, f"rapid change {move:+.1f}pt", "rapid")
+
+    # Adaptive cadence is based on the timestamp of the data we last posted.
+    # Under 10%, official hourly observations are therefore posted hour by hour, even
+    # when a previous observation was manually posted late.
+    interval = timedelta(hours=cadence_hours(rate))
+    elapsed_observation_time = observed - last_posted_observed
+    if elapsed_observation_time >= interval:
+        return Decision(True, f"observation cadence {cadence_label(rate)}", "regular")
+
+    return Decision(False, f"waiting for observation cadence ({cadence_label(rate)})")
+
+
+def fmt(v: float | None, digits: int = 1) -> str:
+    if v is None:
+        return "—"
+    if float(v).is_integer():
+        return f"{int(v):,}"
+    return f"{float(v):,.{digits}f}"
+
+
+def mood(delta: float | None, rate: float) -> str:
+    """A little personality without making drought alerts feel flippant."""
+    if delta is None:
+        return "💧"
+
+    # Below 10%, keep the tone more alert even if the latest observation improved.
+    if rate < 10:
+        if delta >= 1.0:
+            return "😊💧"
+        if delta > 0:
+            return "🙂💧"
+        if delta <= -1.0:
+            return "😰🚨"
+        if delta < 0:
+            return "😥⚠️"
+        return "😐⚠️"
+
+    if delta >= 2.0:
+        return "🤩🎉"
+    if delta >= 1.0:
+        return "😄🌊"
+    if delta >= 0.5:
+        return "😊💧"
+    if delta > 0:
+        return "🙂↗️"
+    if delta <= -2.0:
+        return "😱🚨"
+    if delta <= -1.0:
+        return "😰⚠️"
+    if delta <= -0.5:
+        return "😥↘️"
+    if delta < 0:
+        return "🥲↘️"
+    return "😐➡️"
+
+
+def change_emoji(delta: float | None) -> str:
+    """Arrow for the previous-rate change: up / flat / down."""
+    if delta is None:
+        return ""
+    if delta > 0:
+        return "↗️"
+    if delta < 0:
+        return "↘️"
+    return "➡️"
+
+
+def storage_trend_emoji(current: float | None, previous: float | None) -> str:
+    """Return a compact visual cue for reservoir-volume movement."""
+    if current is None or previous is None:
+        return ""
+    if current > previous:
+        return "🔺"
+    if current < previous:
+        return "🔽"
+    return "➖"
+
+
+def movement_comment(delta: float | None, rate: float) -> str | None:
+    """Short optional comment used only for clearly noticeable moves."""
+    if delta is None:
+        return None
+    if rate < 10:
+        if delta >= 1.0:
+            return "少し持ち直しました💧"
+        if delta <= -1.0:
+            return "厳しい状況が続いています⚠️"
+        return None
+    if delta >= 2.0:
+        return "ぐっと回復しました！🎉"
+    if delta >= 1.0:
+        return "いい感じに増えてます😊"
+    if delta <= -2.0:
+        return "大きく減少しています🚨"
+    if delta <= -1.0:
+        return "やや大きめの減少です⚠️"
+    return None
+
+
+def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] | None, decision: Decision) -> str:
+    observed = as_dt(obs["observed_at"]) or datetime.now(JST)
+    rate = float(obs["rate"])
+    prev_rate = float(prev["rate"]) if prev and prev.get("rate") is not None else None
+    delta_prev = rate - prev_rate if prev_rate is not None else None
+
+    ref24 = find_24h_reference(state, observed)
+    delta24 = rate - float(ref24["rate"]) if ref24 and ref24.get("rate") is not None else None
+
+    if decision.kind == "threshold" and decision.threshold is not None:
+        t = fmt(decision.threshold)
+        if decision.threshold_direction == "down":
+            title = f"🚨 早明浦ダム {t}%を下回りました"
+        else:
+            title = f"🙌 早明浦ダム {t}%を回復しました"
+    elif decision.kind == "rapid":
+        title = "⚡ 早明浦ダム 貯水率が大きく変化"
+    else:
+        title = "💧 早明浦ダム 貯水率"
+
+    # Keep the reservoir status line simple and consistent:
+    # - always show a water drop
+    # - below 10%, put a siren BEFORE the percentage
+    if rate < 10:
+        rate_text = f"🚨 {rate:.1f}% 💧"
+    else:
+        rate_text = f"{rate:.1f}% 💧"
+
+    lines = [
+        title,
+        f"{observed:%m/%d %H:%M}　{rate_text}",
+    ]
+
+    # Show the previous-rate direction with a simple arrow for readability.
+    if delta_prev is not None:
+        change = change_emoji(delta_prev)
+        line = f"前回比 {delta_prev:+.1f}pt {change}"
+        if delta24 is not None:
+            line += f"｜24時間 {delta24:+.1f}pt"
+        lines.append(line)
+    elif delta24 is not None:
+        lines.append(f"24時間 {delta24:+.1f}pt")
+
+    comment = movement_comment(delta_prev, rate)
+    if comment and decision.kind not in {"threshold"}:
+        lines.append(comment)
+
+    if obs.get("storage_thousand_m3") is not None:
+        current_storage = float(obs["storage_thousand_m3"])
+        previous_storage = None
+        if prev and prev.get("storage_thousand_m3") is not None:
+            previous_storage = float(prev["storage_thousand_m3"])
+
+        arrow = storage_trend_emoji(current_storage, previous_storage)
+        suffix = f" {arrow}" if arrow else ""
+        lines.append(f"貯水量 {fmt(current_storage)}×10³m³{suffix}")
+
+    if obs.get("inflow_m3_s") is not None or obs.get("outflow_m3_s") is not None:
+        lines.append(f"流入 {fmt(obs.get('inflow_m3_s'))} / 放流 {fmt(obs.get('outflow_m3_s'))} m³/s")
+
+    if obs.get("rainfall_mm_h") is not None:
+        lines.append(f"流域平均雨量 {fmt(obs['rainfall_mm_h'])} mm/h")
+
+    tags = ["#早明浦ダム", "#吉野川"]
+    if obs.get("drought_restriction_active") is True:
+        tags.append("#渇水")
+    lines.append(" ".join(tags))
+
+    # Intentionally no source line or source URL in auto-posts.
+    # The data source is shown in the X profile / pinned post instead.
+    return "\n".join(lines)
+
+
+def post_to_x(text: str) -> dict[str, Any]:
+    from requests_oauthlib import OAuth1
+
+    required = ["X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET"]
+    missing = [x for x in required if not os.getenv(x)]
+    if missing:
+        raise RuntimeError("missing X credentials: " + ", ".join(missing))
+
+    auth = OAuth1(
+        os.environ["X_API_KEY"],
+        os.environ["X_API_SECRET"],
+        os.environ["X_ACCESS_TOKEN"],
+        os.environ["X_ACCESS_TOKEN_SECRET"],
+    )
+    r = requests.post(X_POST_URL, auth=auth, json={"text": text}, timeout=30)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"X API error {r.status_code}: {r.text}")
+    return r.json()
+
+
+def main() -> int:
+    now = datetime.now(JST)
+    obs = fetch_observation()
+    state = load_state()
+
+    # #渇水 is controlled by the official Yoshinogawa intake-restriction status,
+    # not by a made-up reservoir-percentage threshold. If the official status
+    # pages are temporarily unavailable, keep the last successfully known status.
+    try:
+        drought_status = fetch_drought_status()
+        state["drought_status"] = drought_status
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] drought status failed: {e}", file=sys.stderr)
+        drought_status = state.get("drought_status") or {}
+
+    obs["drought_restriction_active"] = drought_status.get("restriction_active")
+    obs["drought_restriction_level"] = drought_status.get("restriction_level")
+
+    prev, is_new = update_history(state, obs)
+
+    state["last_observed_at"] = obs["observed_at"]
+    state["last_seen_rate"] = obs["rate"]
+
+    # AUTO / MANUAL switching.
+    # MANUAL: do not post to X. Instead, send a copy-ready draft to Discord.
+    # AUTO: post to X normally.
+    mode_config = load_bot_mode()
+
+    # Night safety net: from 23:00 until 07:00 JST, MANUAL is forcibly switched
+    # to AUTO. The change is written to bot_mode.json, so the bot stays AUTO after
+    # 07:00 as well; the user can press the MANUAL button again after waking up.
+    mode_config, forced_auto = apply_forced_auto(mode_config, now)
+    if forced_auto:
+        save_bot_mode(mode_config)
+        print("[INFO] 23:00-07:00 safety window: switched MANUAL -> AUTO")
+
+    observed_dt = as_dt(obs.get("observed_at")) or now
+    mode = str(mode_config.get("mode", "auto")).strip().lower()
+
+    if mode == "manual":
+        decision = choose_manual_notification(obs, state, prev, mode_config)
+        print(f"[INFO] bot mode: manual / Discord draft: {decision.post} / {decision.reason}")
+
+        if decision.post:
+            text = build_post(obs, state, prev, decision)
+            print("\n--- DISCORD DRAFT ---\n" + text + "\n---------------------")
+
+            if DRY_RUN:
+                print("[INFO] DRY_RUN=1: Discordへは送信していません")
+            else:
+                send_discord_draft(text)
+                state["last_discord_notified_at"] = now.isoformat()
+                state["last_discord_notified_observed_at"] = obs["observed_at"]
+                state["last_discord_notified_rate"] = obs["rate"]
+
+        save_state(state)
+        return 0
+
+    allowed, mode_reason = mode_allows_post(mode_config, observed_dt)
+    print(f"[INFO] bot mode: auto / {mode_reason}")
+    if not allowed:
+        save_state(state)
+        return 0
+
+    decision = choose_decision(obs, state, prev, is_new, now)
+    print(json.dumps(obs, ensure_ascii=False, indent=2))
+    print(f"[INFO] decision: {decision.post} / {decision.kind} / {decision.reason}")
+
+    if not decision.post:
+        save_state(state)
+        return 0
+
+    text = build_post(obs, state, prev, decision)
+    print("\n--- POST PREVIEW ---\n" + text + "\n--------------------")
+
+    if DRY_RUN:
+        print("[INFO] DRY_RUN=1: Xへは投稿していません")
+        save_state(state)
+        return 0
+
+    result = post_to_x(text)
+    print("[INFO] posted:", json.dumps(result, ensure_ascii=False))
+
+    state["last_posted_at"] = now.isoformat()
+    state["last_posted_observed_at"] = obs["observed_at"]
+    state["last_posted_rate"] = obs["rate"]
+    state["last_post_id"] = result.get("data", {}).get("id")
+    increment_posts_today(state, now)
+
+    save_state(state)
+    return 0
+
 
 if __name__ == "__main__":
-    unittest.main()
-
-class TestMoodV4(unittest.TestCase):
-    def test_happy_moods(self):
-        self.assertEqual(bot.mood(0.2, 50), "🙂↗️")
-        self.assertEqual(bot.mood(0.7, 50), "😊💧")
-        self.assertEqual(bot.mood(1.2, 50), "😄🌊")
-        self.assertEqual(bot.mood(2.2, 50), "🤩🎉")
-
-    def test_low_storage_stays_serious(self):
-        self.assertEqual(bot.mood(0.5, 9.0), "🙂💧")
-        self.assertEqual(bot.mood(-1.2, 9.0), "😰🚨")
-
-    def test_movement_comment(self):
-        self.assertEqual(bot.movement_comment(1.2, 30), "いい感じに増えてます😊")
-        self.assertEqual(bot.movement_comment(-2.2, 30), "大きく減少しています🚨")
-
-class TestDroughtStatusV45(unittest.TestCase):
-    def test_parse_home_banner_active(self):
-        text = "早明浦ダムの貯水率低下に伴い、8月28日9時から第四次取水制限が実施されています。"
-        status = bot.parse_drought_status_text(text)
-        self.assertIsNotNone(status)
-        self.assertTrue(status["restriction_active"])
-        self.assertEqual(status["restriction_level"], "第四次")
-
-    def test_parse_water_source_continuing_active(self):
-        text = "令和8年9月1日 継続中 第四次取水制限（香川県60.0%）"
-        status = bot.parse_drought_status_text(text)
-        self.assertIsNotNone(status)
-        self.assertTrue(status["restriction_active"])
-        self.assertEqual(status["restriction_level"], "第四次")
-
-    def test_historical_restriction_alone_is_not_current(self):
-        text = "令和8年8月3日 第一次取水制限 令和8年8月10日 第二次取水制限"
-        self.assertIsNone(bot.parse_drought_status_text(text))
-
-    def test_drought_hashtag_only_when_official_restriction_active(self):
-        base_obs = {
-            "observed_at": "2026-09-05T20:00:00+09:00",
-            "rate": 8.6,
-            "rainfall_mm_h": 0.0,
-            "storage_thousand_m3": 29440.0,
-            "inflow_m3_s": 10.2,
-            "outflow_m3_s": 44.0,
-            "source": "国土交通省 川の防災情報",
-            "source_url": bot.RIVER_URL,
-            "source_kind": "realtime",
-        }
-        prev = {"observed_at": "2026-09-05T19:00:00+09:00", "rate": 8.7}
-        state = bot.default_state()
-        state["history"] = [prev, {"observed_at": base_obs["observed_at"], "rate": base_obs["rate"]}]
-
-        active_obs = dict(base_obs, drought_restriction_active=True)
-        text = bot.build_post(active_obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertIn("#早明浦ダム #吉野川 #渇水", text)
-
-        normal_obs = dict(base_obs, drought_restriction_active=False)
-        text = bot.build_post(normal_obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertIn("#早明浦ダム #吉野川", text)
-        self.assertNotIn("#渇水", text)
-
-    def test_regular_title_is_fixed_and_source_line_is_absent(self):
-        obs = {
-            "observed_at": "2026-09-05T20:00:00+09:00",
-            "rate": 8.6,
-            "rainfall_mm_h": 0.0,
-            "storage_thousand_m3": 29440.0,
-            "inflow_m3_s": 10.2,
-            "outflow_m3_s": 44.0,
-            "source": "国土交通省 川の防災情報",
-            "source_url": bot.RIVER_URL,
-            "source_kind": "realtime",
-            "drought_restriction_active": True,
-        }
-        prev = {"observed_at": "2026-09-05T19:00:00+09:00", "rate": 8.7}
-        state = bot.default_state()
-        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
-        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertTrue(text.startswith("💧 早明浦ダム 貯水率\n"))
-        self.assertNotIn("出典：", text)
-
-
-class TestStorageTrendV46(unittest.TestCase):
-    def test_storage_trend_emoji(self):
-        self.assertEqual(bot.storage_trend_emoji(28120.0, 28110.0), "🔺")
-        self.assertEqual(bot.storage_trend_emoji(28100.0, 28110.0), "🔽")
-        self.assertEqual(bot.storage_trend_emoji(28110.0, 28110.0), "➖")
-        self.assertEqual(bot.storage_trend_emoji(28110.0, None), "")
-
-    def test_post_shows_storage_down_arrow(self):
-        obs = {
-            "observed_at": "2026-09-06T17:00:00+09:00",
-            "rate": 7.7,
-            "rainfall_mm_h": 0.0,
-            "storage_thousand_m3": 28110.0,
-            "inflow_m3_s": 6.3,
-            "outflow_m3_s": 46.2,
-            "source": "国土交通省 川の防災情報",
-            "source_url": bot.RIVER_URL,
-            "source_kind": "realtime",
-            "drought_restriction_active": True,
-        }
-        prev = {
-            "observed_at": "2026-09-06T16:00:00+09:00",
-            "rate": 7.8,
-            "storage_thousand_m3": 28200.0,
-        }
-        state = bot.default_state()
-        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"], "storage_thousand_m3": obs["storage_thousand_m3"]}]
-        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
-        self.assertIn("貯水量 28,110×10³m³ 🔽", text)
-
-
-class TestRateChangeArrowV47(unittest.TestCase):
-    def test_rate_change_arrows(self):
-        self.assertEqual(bot.change_emoji(0.1), "↗️")
-        self.assertEqual(bot.change_emoji(0.0), "➡️")
-        self.assertEqual(bot.change_emoji(-0.1), "↘️")
-        self.assertEqual(bot.change_emoji(None), "")
-
-
-class TestModeSwitchV411(unittest.TestCase):
-    def test_manual_mode_blocks_automatic_post(self):
-        observed = datetime(2026, 9, 14, 18, 0, tzinfo=JST)
-        allowed, reason = bot.mode_allows_post(
-            {"mode": "manual", "changed_at": "2026-09-14T08:00:00+00:00"},
-            observed,
-        )
-        self.assertFalse(allowed)
-        self.assertEqual(reason, "manual mode")
-
-    def test_auto_resume_skips_current_old_observation(self):
-        # AUTO is enabled at 22:30 JST. The already-existing 22:00 data should not
-        # be automatically posted because the user may have posted it manually.
-        observed = datetime(2026, 9, 14, 22, 0, tzinfo=JST)
-        allowed, reason = bot.mode_allows_post(
-            {"mode": "auto", "changed_at": "2026-09-14T13:30:00+00:00"},
-            observed,
-        )
-        self.assertFalse(allowed)
-        self.assertIn("AUTO resume", reason)
-
-    def test_auto_resume_posts_next_new_observation(self):
-        # AUTO is enabled at 22:30 JST. The next 23:00 official observation is new.
-        observed = datetime(2026, 9, 14, 23, 0, tzinfo=JST)
-        allowed, reason = bot.mode_allows_post(
-            {"mode": "auto", "changed_at": "2026-09-14T13:30:00+00:00"},
-            observed,
-        )
-        self.assertTrue(allowed)
-        self.assertEqual(reason, "auto mode")
+    raise SystemExit(main())
