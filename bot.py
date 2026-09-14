@@ -33,6 +33,8 @@ WATER_URL = "https://www.water.go.jp/yoshino/yoshino/"
 WATER_SOURCE_URL = "https://www.water.go.jp/yoshino/yoshino/water_source.html"
 X_POST_URL = "https://api.x.com/2/tweets"
 STATE_PATH = Path(os.getenv("STATE_PATH", "state.json"))
+MODE_PATH = Path(os.getenv("BOT_MODE_PATH", "bot_mode.json"))
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
 
 THRESHOLDS = sorted({float(x) for x in os.getenv("THRESHOLDS", "5,10,15,20,25,30,40,50,60,70,80,90").split(",") if x.strip()})
 MAX_POSTS_PER_DAY = int(os.getenv("MAX_POSTS_PER_DAY", "30"))
@@ -57,7 +59,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.10 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.12 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -348,6 +350,9 @@ def default_state() -> dict[str, Any]:
         "last_posted_observed_at": None,
         "last_posted_rate": None,
         "last_post_id": None,
+        "last_discord_notified_at": None,
+        "last_discord_notified_observed_at": None,
+        "last_discord_notified_rate": None,
         "history": [],
         "report_slots": {},
         "daily_post_counts": {},
@@ -374,6 +379,128 @@ def load_state() -> dict[str, Any]:
 
 def save_state(state: dict[str, Any]) -> None:
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_bot_mode() -> dict[str, Any]:
+    """Read AUTO/MANUAL mode from bot_mode.json.
+
+    Missing file defaults to AUTO for backward compatibility.
+    A malformed file fails safe to MANUAL so the bot does not post unexpectedly.
+    """
+    if not MODE_PATH.exists():
+        return {"mode": "auto", "changed_at": None}
+
+    try:
+        data = json.loads(MODE_PATH.read_text(encoding="utf-8"))
+        mode = str(data.get("mode", "auto")).strip().lower()
+        if mode not in {"auto", "manual"}:
+            raise ValueError(f"unknown bot mode: {mode}")
+        return {
+            "mode": mode,
+            "changed_at": data.get("changed_at"),
+        }
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] failed to read bot_mode.json: {e}; using MANUAL for safety", file=sys.stderr)
+        return {"mode": "manual", "changed_at": None}
+
+
+def mode_allows_post(mode_config: dict[str, Any], observed: datetime) -> tuple[bool, str]:
+    """Return whether X posting is allowed for the current mode.
+
+    MANUAL mode keeps polling and updating history, but never posts automatically.
+    When switching back to AUTO, observations at/before the switch time are skipped.
+    That prevents the bot from immediately duplicating the last observation the user
+    may just have posted manually. The next new official observation posts normally.
+    """
+    mode = str(mode_config.get("mode", "auto")).strip().lower()
+    if mode == "manual":
+        return False, "manual mode"
+
+    changed_at = as_dt(mode_config.get("changed_at"))
+    if changed_at is not None and observed <= changed_at:
+        return False, "waiting for first new observation after AUTO resume"
+
+    return True, "auto mode"
+
+
+def choose_manual_notification(
+    obs: dict[str, Any],
+    state: dict[str, Any],
+    prev: dict[str, Any] | None,
+    mode_config: dict[str, Any],
+) -> Decision:
+    """Decide whether MANUAL mode should send a copy-ready Discord draft.
+
+    Discord notifications follow the same observation cadence as the bot, but use
+    their own last-notified timestamp/rate. This avoids duplicate Discord messages
+    while keeping manual posting independent from automatic X post history.
+    """
+    observed = as_dt(obs.get("observed_at"))
+    if observed is None:
+        return Decision(False, "invalid observation time")
+
+    changed_at = as_dt(mode_config.get("changed_at"))
+    if changed_at is not None and observed <= changed_at:
+        return Decision(False, "waiting for first new observation after MANUAL switch")
+
+    last_notified_observed = as_dt(state.get("last_discord_notified_observed_at"))
+    last_notified_rate = state.get("last_discord_notified_rate")
+
+    # A notification from an older MANUAL session must not control this session.
+    if changed_at is not None and last_notified_observed is not None and last_notified_observed <= changed_at:
+        last_notified_observed = None
+        last_notified_rate = None
+
+    if last_notified_observed is not None and observed <= last_notified_observed:
+        return Decision(False, "Discord already notified for this observation")
+
+    # First new official observation after switching to MANUAL: always notify.
+    if last_notified_observed is None:
+        old_rate = float(prev["rate"]) if prev and prev.get("rate") is not None else None
+        crossing = crossed_threshold(old_rate, float(obs["rate"]))
+        if crossing:
+            direction, threshold = crossing
+            return Decision(True, f"manual threshold {threshold}% {direction}", "threshold", threshold, direction)
+        if old_rate is not None:
+            move = float(obs["rate"]) - old_rate
+            if abs(move) >= RAPID_CHANGE_PT:
+                return Decision(True, f"manual rapid change {move:+.1f}pt", "rapid")
+        return Decision(True, "first new observation in manual mode", "regular")
+
+    current_rate = float(obs["rate"])
+    old_rate = float(last_notified_rate) if last_notified_rate is not None else None
+
+    crossing = crossed_threshold(old_rate, current_rate)
+    if crossing:
+        direction, threshold = crossing
+        return Decision(True, f"manual threshold {threshold}% {direction}", "threshold", threshold, direction)
+
+    if old_rate is not None:
+        move = current_rate - old_rate
+        if abs(move) >= RAPID_CHANGE_PT:
+            return Decision(True, f"manual rapid change {move:+.1f}pt", "rapid")
+
+    interval = timedelta(hours=cadence_hours(current_rate))
+    if observed - last_notified_observed >= interval:
+        return Decision(True, f"manual observation cadence {cadence_label(current_rate)}", "regular")
+
+    return Decision(False, f"waiting for manual observation cadence ({cadence_label(current_rate)})")
+
+
+def send_discord_draft(text: str) -> None:
+    """Send the exact X draft to Discord as plain text for easy copy/paste."""
+    if not DISCORD_WEBHOOK_URL:
+        raise RuntimeError("DISCORD_WEBHOOK_URL is not configured")
+
+    # Keep the Discord message itself identical to the X draft. No prefix/suffix,
+    # so the user can copy the whole message and paste it straight into X.
+    payload = {
+        "content": text,
+        "allowed_mentions": {"parse": []},
+    }
+    r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=20)
+    if r.status_code not in (200, 204):
+        raise RuntimeError(f"Discord webhook error {r.status_code}: {r.text}")
 
 
 def as_dt(iso: str | None) -> datetime | None:
@@ -739,6 +866,38 @@ def main() -> int:
 
     state["last_observed_at"] = obs["observed_at"]
     state["last_seen_rate"] = obs["rate"]
+
+    # AUTO / MANUAL switching.
+    # MANUAL: do not post to X. Instead, send a copy-ready draft to Discord.
+    # AUTO: post to X normally.
+    mode_config = load_bot_mode()
+    observed_dt = as_dt(obs.get("observed_at")) or now
+    mode = str(mode_config.get("mode", "auto")).strip().lower()
+
+    if mode == "manual":
+        decision = choose_manual_notification(obs, state, prev, mode_config)
+        print(f"[INFO] bot mode: manual / Discord draft: {decision.post} / {decision.reason}")
+
+        if decision.post:
+            text = build_post(obs, state, prev, decision)
+            print("\n--- DISCORD DRAFT ---\n" + text + "\n---------------------")
+
+            if DRY_RUN:
+                print("[INFO] DRY_RUN=1: Discordへは送信していません")
+            else:
+                send_discord_draft(text)
+                state["last_discord_notified_at"] = now.isoformat()
+                state["last_discord_notified_observed_at"] = obs["observed_at"]
+                state["last_discord_notified_rate"] = obs["rate"]
+
+        save_state(state)
+        return 0
+
+    allowed, mode_reason = mode_allows_post(mode_config, observed_dt)
+    print(f"[INFO] bot mode: auto / {mode_reason}")
+    if not allowed:
+        save_state(state)
+        return 0
 
     decision = choose_decision(obs, state, prev, is_new, now)
     print(json.dumps(obs, ensure_ascii=False, indent=2))
