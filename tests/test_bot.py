@@ -161,15 +161,43 @@ class BotTests(unittest.TestCase):
 
 
 
-class TestDiscordManualV412(unittest.TestCase):
-    def test_manual_waits_for_observation_after_switch(self):
+class TestDiscordManualV413(unittest.TestCase):
+    def test_manual_switch_can_notify_latest_observation_immediately(self):
+        # MANUAL is enabled at 18:30, but the latest official value is the 18:00 row.
+        # It should still be sent immediately if Discord has not received it yet.
         obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
         state = bot.default_state()
         prev = {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4}
         mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}  # 18:30 JST
         d = bot.choose_manual_notification(obs, state, prev, mode)
+        self.assertTrue(d.post)
+        self.assertEqual(d.kind, "regular")
+        self.assertIn("latest observation", d.reason)
+
+
+    def test_manual_same_latest_observation_is_not_sent_twice(self):
+        obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
+        state = bot.default_state()
+        state["last_discord_notified_observed_at"] = "2026-09-14T18:00:00+09:00"
+        state["last_discord_notified_rate"] = 10.5
+        prev = {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4}
+        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}
+        d = bot.choose_manual_notification(obs, state, prev, mode)
         self.assertFalse(d.post)
-        self.assertIn("MANUAL switch", d.reason)
+        self.assertIn("already notified", d.reason)
+
+    def test_repeat_poll_returns_previous_distinct_observation(self):
+        state = bot.default_state()
+        state["history"] = [
+            {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4},
+            {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5},
+        ]
+        obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
+        prev, is_new = bot.update_history(state, obs)
+        self.assertFalse(is_new)
+        self.assertIsNotNone(prev)
+        self.assertEqual(prev["observed_at"], "2026-09-14T17:00:00+09:00")
+        self.assertEqual(prev["rate"], 10.4)
 
     def test_manual_first_new_observation_notifies(self):
         obs = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
