@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 os.environ.setdefault("STATE_PATH", tempfile.mktemp())
@@ -159,6 +160,71 @@ class BotTests(unittest.TestCase):
         self.assertEqual(rows[-1]["observed_at"], "2026-09-05T09:00:00+09:00")
 
 
+
+class TestDiscordManualV412(unittest.TestCase):
+    def test_manual_waits_for_observation_after_switch(self):
+        obs = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
+        state = bot.default_state()
+        prev = {"observed_at": "2026-09-14T17:00:00+09:00", "rate": 10.4}
+        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}  # 18:30 JST
+        d = bot.choose_manual_notification(obs, state, prev, mode)
+        self.assertFalse(d.post)
+        self.assertIn("MANUAL switch", d.reason)
+
+    def test_manual_first_new_observation_notifies(self):
+        obs = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
+        state = bot.default_state()
+        prev = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
+        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}  # 18:30 JST
+        d = bot.choose_manual_notification(obs, state, prev, mode)
+        self.assertTrue(d.post)
+        self.assertEqual(d.kind, "regular")
+
+    def test_manual_does_not_repeat_same_observation(self):
+        obs = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
+        state = bot.default_state()
+        state["last_discord_notified_observed_at"] = "2026-09-14T19:00:00+09:00"
+        state["last_discord_notified_rate"] = 10.6
+        prev = {"observed_at": "2026-09-14T18:00:00+09:00", "rate": 10.5}
+        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}
+        d = bot.choose_manual_notification(obs, state, prev, mode)
+        self.assertFalse(d.post)
+        self.assertIn("already notified", d.reason)
+
+    def test_manual_under_30_notifies_next_hour(self):
+        obs = {"observed_at": "2026-09-14T20:00:00+09:00", "rate": 10.7}
+        state = bot.default_state()
+        state["last_discord_notified_observed_at"] = "2026-09-14T19:00:00+09:00"
+        state["last_discord_notified_rate"] = 10.6
+        prev = {"observed_at": "2026-09-14T19:00:00+09:00", "rate": 10.6}
+        mode = {"mode": "manual", "changed_at": "2026-09-14T09:30:00+00:00"}
+        d = bot.choose_manual_notification(obs, state, prev, mode)
+        self.assertTrue(d.post)
+        self.assertIn("1時間ごと", d.reason)
+
+    def test_discord_draft_is_same_text_as_x_draft(self):
+        obs = {
+            "observed_at": "2026-09-14T20:00:00+09:00",
+            "rate": 10.7,
+            "rainfall_mm_h": 0.0,
+            "storage_thousand_m3": 30000.0,
+            "inflow_m3_s": 8.0,
+            "outflow_m3_s": 0.0,
+            "drought_restriction_active": True,
+        }
+        prev = {
+            "observed_at": "2026-09-14T19:00:00+09:00",
+            "rate": 10.6,
+            "storage_thousand_m3": 29900.0,
+        }
+        state = bot.default_state()
+        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
+        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertIn("前回比 +0.1pt ↗️", text)
+        self.assertIn("流域平均雨量 0 mm/h", text)
+        self.assertIn("#早明浦ダム #吉野川 #渇水", text)
+        self.assertNotIn("DISCORD", text)
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -279,3 +345,35 @@ class TestRateChangeArrowV47(unittest.TestCase):
         self.assertEqual(bot.change_emoji(0.0), "➡️")
         self.assertEqual(bot.change_emoji(-0.1), "↘️")
         self.assertEqual(bot.change_emoji(None), "")
+
+
+class TestModeSwitchV411(unittest.TestCase):
+    def test_manual_mode_blocks_automatic_post(self):
+        observed = datetime(2026, 9, 14, 18, 0, tzinfo=JST)
+        allowed, reason = bot.mode_allows_post(
+            {"mode": "manual", "changed_at": "2026-09-14T08:00:00+00:00"},
+            observed,
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "manual mode")
+
+    def test_auto_resume_skips_current_old_observation(self):
+        # AUTO is enabled at 22:30 JST. The already-existing 22:00 data should not
+        # be automatically posted because the user may have posted it manually.
+        observed = datetime(2026, 9, 14, 22, 0, tzinfo=JST)
+        allowed, reason = bot.mode_allows_post(
+            {"mode": "auto", "changed_at": "2026-09-14T13:30:00+00:00"},
+            observed,
+        )
+        self.assertFalse(allowed)
+        self.assertIn("AUTO resume", reason)
+
+    def test_auto_resume_posts_next_new_observation(self):
+        # AUTO is enabled at 22:30 JST. The next 23:00 official observation is new.
+        observed = datetime(2026, 9, 14, 23, 0, tzinfo=JST)
+        allowed, reason = bot.mode_allows_post(
+            {"mode": "auto", "changed_at": "2026-09-14T13:30:00+00:00"},
+            observed,
+        )
+        self.assertTrue(allowed)
+        self.assertEqual(reason, "auto mode")
