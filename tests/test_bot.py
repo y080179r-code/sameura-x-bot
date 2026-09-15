@@ -147,6 +147,28 @@ class BotTests(unittest.TestCase):
         self.assertIn("前回比 -0.1pt ↘️", text)
         self.assertIn("貯水量 29,690×10³m³", text)
 
+    def test_flow_values_always_show_one_decimal_place(self):
+        obs = {
+            "observed_at": "2026-09-15T10:00:00+09:00",
+            "rate": 11.0,
+            "rainfall_mm_h": 0.3,
+            "storage_thousand_m3": 33660.0,
+            "inflow_m3_s": 7.0,
+            "outflow_m3_s": 0.0,
+            "drought_restriction_active": True,
+        }
+        prev = {
+            "observed_at": "2026-09-15T09:00:00+09:00",
+            "rate": 11.0,
+            "storage_thousand_m3": 33660.0,
+        }
+        state = bot.default_state()
+        state["history"] = [prev, {"observed_at": obs["observed_at"], "rate": obs["rate"]}]
+        text = bot.build_post(obs, state, prev, bot.Decision(True, "test", "regular"))
+        self.assertIn("流入 7.0 / 放流 0.0 m³/s", text)
+        self.assertIn("流域平均雨量 0.3 mm/h", text)
+
+
     def test_extract_river_rows(self):
         html = b"""
         <table>
