@@ -59,7 +59,7 @@ DRY_RUN = os.getenv("DRY_RUN", "").lower() in {"1", "true", "yes", "on"}
 FORCE_POST = os.getenv("FORCE_POST", "").lower() in {"1", "true", "yes", "on"}
 
 HEADERS = {
-    "User-Agent": "SameuraReservoirBot/4.14 (public-interest dam status bot)",
+    "User-Agent": "SameuraReservoirBot/4.15 (public-interest dam status bot)",
     "Accept-Language": "ja,en;q=0.5",
 }
 
@@ -717,6 +717,13 @@ def fmt(v: float | None, digits: int = 1) -> str:
     return f"{float(v):,.{digits}f}"
 
 
+def fmt1(v: float | None) -> str:
+    """Always show one decimal place, e.g. 7 -> 7.0 and 0 -> 0.0."""
+    if v is None:
+        return "—"
+    return f"{float(v):,.1f}"
+
+
 def mood(delta: float | None, rate: float) -> str:
     """A little personality without making drought alerts feel flippant."""
     if delta is None:
@@ -854,7 +861,7 @@ def build_post(obs: dict[str, Any], state: dict[str, Any], prev: dict[str, Any] 
         lines.append(f"貯水量 {fmt(current_storage)}×10³m³{suffix}")
 
     if obs.get("inflow_m3_s") is not None or obs.get("outflow_m3_s") is not None:
-        lines.append(f"流入 {fmt(obs.get('inflow_m3_s'))} / 放流 {fmt(obs.get('outflow_m3_s'))} m³/s")
+        lines.append(f"流入 {fmt1(obs.get('inflow_m3_s'))} / 放流 {fmt1(obs.get('outflow_m3_s'))} m³/s")
 
     if obs.get("rainfall_mm_h") is not None:
         lines.append(f"流域平均雨量 {fmt(obs['rainfall_mm_h'])} mm/h")
