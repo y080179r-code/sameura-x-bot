@@ -1,22 +1,14 @@
 {
-  "last_observed_at": "2026-09-21T13:00:00+09:00",
-  "last_seen_rate": 14.9,
+  "last_observed_at": "2026-09-21T14:00:00+09:00",
+  "last_seen_rate": 14.8,
   "last_posted_at": "2026-09-21T07:11:08.650261+09:00",
   "last_posted_observed_at": "2026-09-21T07:00:00+09:00",
   "last_posted_rate": 14.8,
   "last_post_id": "2101796356302016923",
-  "last_discord_notified_at": "2026-09-21T13:12:10.599539+09:00",
-  "last_discord_notified_observed_at": "2026-09-21T13:00:00+09:00",
-  "last_discord_notified_rate": 14.9,
+  "last_discord_notified_at": "2026-09-21T14:12:10.058314+09:00",
+  "last_discord_notified_observed_at": "2026-09-21T14:00:00+09:00",
+  "last_discord_notified_rate": 14.8,
   "history": [
-    {
-      "observed_at": "2026-09-18T14:00:00+09:00",
-      "rate": 13.3,
-      "storage_thousand_m3": 37200.0,
-      "inflow_m3_s": null,
-      "outflow_m3_s": null,
-      "rainfall_mm_h": 0.0
-    },
     {
       "observed_at": "2026-09-18T15:00:00+09:00",
       "rate": 13.3,
@@ -559,6 +551,14 @@
       "storage_thousand_m3": 39500.0,
       "inflow_m3_s": 12.09,
       "outflow_m3_s": 17.1,
+      "rainfall_mm_h": 0.0
+    },
+    {
+      "observed_at": "2026-09-21T14:00:00+09:00",
+      "rate": 14.8,
+      "storage_thousand_m3": 39470.0,
+      "inflow_m3_s": 10.97,
+      "outflow_m3_s": 27.2,
       "rainfall_mm_h": 0.0
     }
   ],
