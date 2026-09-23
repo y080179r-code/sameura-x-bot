@@ -10,14 +10,6 @@
   "last_discord_notified_rate": 14.4,
   "history": [
     {
-      "observed_at": "2026-09-21T08:00:00+09:00",
-      "rate": 14.8,
-      "storage_thousand_m3": 39380.0,
-      "inflow_m3_s": 4.41,
-      "outflow_m3_s": 0.0,
-      "rainfall_mm_h": 0.0
-    },
-    {
       "observed_at": "2026-09-21T09:00:00+09:00",
       "rate": 14.8,
       "storage_thousand_m3": 39410.0,
